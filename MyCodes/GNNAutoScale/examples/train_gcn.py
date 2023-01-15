@@ -25,9 +25,9 @@ from torch.profiler import record_function
 
 from torch.utils.tensorboard import SummaryWriter
 
-METIS_PARTITION = False
-DEBUG = True
-SHULFFLE_DATA = False
+METIS_PARTITION = True
+DEBUG = False
+SHULFFLE_DATA = True
 
 writer = SummaryWriter('/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/tensorboard/dgl-metis-GraphConv')
 torch.manual_seed(12345)
@@ -63,9 +63,10 @@ prof.schedule = torch.profiler.schedule(
 if DEBUG:
     g = dgl.DGLGraph()
     g.add_nodes(5)
-    g.add_edges([0, 0, 2, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5], 
-                [1, 2, 3, 0, 2, 3, 0, 1, 3, 4, 1, 2, 4, 5, 2, 3, 5, 4, 4])
+    g.add_edges([0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5], 
+                [1, 2, 0, 2, 3, 0, 1, 3, 4, 1, 2, 4, 5, 2, 3, 5, 4, 4])
     g.ndata['feat'] = torch.randn(6, 4)
+    print(g.ndata['feat'])
 else:
     # load and preprocess dataset
     transform = (
@@ -89,13 +90,13 @@ device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
 
 
 # 由metis或者顺序划分得到多个节点区间后，一次训练选择多少个节点区间
-num_partitions_per_it = 1
+num_partitions_per_it = 10
 
 num_layers = 3
 
 if METIS_PARTITION:
     # Metis Partition
-    num_parts = 500
+    num_parts = 40
     part_dict = dgl.metis_partition(g, num_parts, reshuffle=True, 
     # balance_ntypes=g.ndata['train_mask']
     )
@@ -160,7 +161,7 @@ def parse_args_from_block(block, training=True):
 
 criterion = torch.nn.CrossEntropyLoss()
 def train(model: GCN, loader, optimizer):
-    # model.train()
+    model.train()
 
     for it, blocks in enumerate(loader):
         block = blocks[0]
