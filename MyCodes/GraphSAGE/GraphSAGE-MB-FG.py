@@ -24,8 +24,10 @@ prof = profile(
         ],
     record_shapes=True
 )
+from torch.utils.tensorboard import SummaryWriter
 
-torch.manual_seed(5828)
+writer = SummaryWriter('/home/lihz/Codes/dgl/MyCodes/Profiling/GraphSAGE/tensorboard/MB_FG')
+torch.manual_seed(1234)
 class SAGE(nn.Module):
     def __init__(self, in_size, hid_size, out_size):
         super().__init__()
@@ -118,11 +120,8 @@ def train(args, device, g, dataset, model):
     steps_per_epoch = ceil(n_train_nodes / batch_size)
     # prof.schedule = torch.profiler.schedule(
     #     wait=steps_per_epoch, warmup=steps_per_epoch,
-    #     active=10*steps_per_epoch, repeat=1)
-    sampler = NeighborSampler([25, 10],  # fanout for [layer-0, layer-1]
-                              prefetch_node_feats=['feat'],
-                              prefetch_labels=['label'])
-    # use_uva = (args.mode == 'mixed')
+    #     active=10*steps_per_epoch, repeat=1)]
+    sampler = MultiLayerFullNeighborSampler(2, prefetch_node_feats=['feat'], prefetch_labels=['label'])
     use_uva = True
     train_dataloader = DataLoader(g, train_idx, sampler, device=device,
                                   batch_size=batch_size, shuffle=True,
@@ -153,6 +152,7 @@ def train(args, device, g, dataset, model):
             # prof.step()
             # print(it)
         micro_f1 = evaluate(model, g, val_dataloader)
+        writer.add_scalar('Micro-F1', micro_f1, epoch)
 
         print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
               .format(epoch, total_loss / (it+1), micro_f1))
@@ -168,7 +168,7 @@ if __name__ == '__main__':
     # )
     parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=30)
+    parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--num-epochs", type=int, default=200)
     args = parser.parse_args()
     # if not torch.cuda.is_available():
