@@ -41,7 +41,7 @@ class GCN(ScalableGNN):
             if i == num_layers - 1 and not linear:
                 out_dim = out_channels
             conv = dglnn.GraphConv(in_dim, out_dim)
-            # conv = dglnn.SAGEConv(in_dim, out_dim, aggregator_type='mean')
+            # conv = dglnn.SAGEConv(in_dim, out_dim, aggregator_type='gcn')
             self.convs.append(conv)
 
         self.bns = ModuleList()

@@ -32,9 +32,12 @@ class SAGE(nn.Module):
     def __init__(self, in_size, hid_size, out_size):
         super().__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'gcn'))  # type: ignore
-        self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'gcn'))  # type: ignore
-        self.dropout = nn.Dropout(0.5)
+        self.layers.append(dglnn.GraphConv(in_size, hid_size))
+        self.layers.append(dglnn.GraphConv(hid_size, hid_size))
+        self.layers.append(dglnn.GraphConv(hid_size, out_size))
+        # self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'mean'))
+        # self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'mean'))
+        # self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
 
@@ -45,7 +48,7 @@ class SAGE(nn.Module):
             h = layer(block, h)
             if l != len(self.layers) - 1:
                 h = F.relu(h)
-                h = self.dropout(h)
+                # h = self.dropout(h)
         return h
 
     def inference(self, g, device, batch_size):
@@ -140,6 +143,7 @@ def train(args, device, g, dataset, model):
         model.train()
         total_loss = 0
         for it, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
+            # print(it)
             x = blocks[0].srcdata['feat']
             y = blocks[-1].dstdata['label']
             with record_function("Forward Computation"):
@@ -153,6 +157,7 @@ def train(args, device, g, dataset, model):
             # print(it)
         micro_f1 = evaluate(model, g, val_dataloader)
         writer.add_scalar('Micro-F1', micro_f1, epoch)
+        writer.add_scalar('Test Accuracy', micro_f1, epoch)
 
         print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
               .format(epoch, total_loss / (it+1), micro_f1))
@@ -168,7 +173,7 @@ if __name__ == '__main__':
     # )
     parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=1000)
+    parser.add_argument("--batch-size", type=int, default=35)
     parser.add_argument("--num-epochs", type=int, default=200)
     args = parser.parse_args()
     # if not torch.cuda.is_available():

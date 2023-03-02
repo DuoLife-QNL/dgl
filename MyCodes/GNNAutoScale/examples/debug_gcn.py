@@ -15,12 +15,6 @@ import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
 from dgl.data import CoraGraphDataset
-from dgl.data import CiteseerGraphDataset
-from dgl.data import RedditDataset
-from dgl.data import PubmedGraphDataset
-from dgl.data import CoauthorCSDataset
-from dgl.data import WikiCSDataset
-from dgl.data import FlickrDataset
 import pdb
 
 from dgl.dataloading import NeighborSampler, MultiLayerFullNeighborSampler
@@ -31,52 +25,12 @@ from torch.profiler import record_function
 
 from torch.utils.tensorboard import SummaryWriter
 
-# Running Configurations
-METIS_PARTITION = True
-DEBUG = False
-SHULFFLE_DATA = True
-PROFILING = False
-# 集成在Tensorboard中的收敛曲线显示
-ACCLOG = False
+METIS_PARTITION = False
+DEBUG = True
+SHULFFLE_DATA = False
 
-# Hyperparameters
-DATASET = 'Pubmed'
-SELF_LOOP = True
-# GCN Norm is set to True ('both' in GraphConv) by default
-NUM_LAYERS = 2
-HIDDEN_CHANNELS = 256
-DROPOUT = 0.3
-NUM_PARTS = 24
-BATCH_SIZE = 12
-LR = 0.01
-REG_WEIGHT_DECAY = 0.0
-NONREG_WEIGHT_DECAY = 0.0
-GRAD_NORM = None
-EPOCHS = 400
-
-"""
-for small datasets, the following settings should be default:
-DROP_INPUT = True
-BATCH_NORM = False
-RESIDUAL = False
-LINEAR = False
-POOL_SIZE = None
-"""
-DROP_INPUT = True
-BATCH_NORM = True
-RESIDUAL = False
-LINEAR = False
-POOL_SIZE = 2
-
-# for small datasets, buffer_size should be set to None
-BUFFER_SIZE = 77405
-
-
+writer = SummaryWriter('/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/tensorboard/dgl-metis-GraphConv')
 torch.manual_seed(12345)
-
-
-if ACCLOG:
-    writer = SummaryWriter('/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/tensorboard/dgl-seq-GraphConv')
 class GlobalIterater(object):
     def __init__(self):
         self.iter = 0
@@ -93,7 +47,7 @@ prof = torch.profiler.profile(
         torch.profiler.ProfilerActivity.CPU,
         torch.profiler.ProfilerActivity.CUDA,
     ],
-    on_trace_ready=torch.profiler.tensorboard_trace_handler('/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/tensorboard/dgl-seq-GraphConv'),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler('/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/tensorboard/dgl'),
     record_shapes=True,
     with_stack=True,
     with_modules=True
@@ -115,32 +69,13 @@ if DEBUG:
     print(g.ndata['feat'])
 else:
     # load and preprocess dataset
-    if SELF_LOOP:
-        transform = (
-            AddSelfLoop()
-        )  # by default, it will first remove self-loops to prevent duplication
-    else:
-        transform = None
-    if DATASET == 'Cora':
-        data = CoraGraphDataset(transform=transform)
-    elif DATASET == 'Citeseer':
-        data = CiteseerGraphDataset(transform=transform)
-    elif DATASET == 'Pubmed':
-        data = PubmedGraphDataset(transform=transform)
-    elif DATASET == 'CoauthorCS':
-        data = CoauthorCSDataset(transform=transform)
-    elif DATASET == 'WikiCS':
-        data = WikiCSDataset(transform=transform)
-    elif DATASET == 'Reddit':
-        data = RedditDataset(transform=transform)
-    elif DATASET == 'Flickr':
-        data = FlickrDataset(transform=transform)
+    transform = (
+        AddSelfLoop()
+    )  # by default, it will first remove self-loops to prevent duplication
+    data = CoraGraphDataset(transform=transform)
     g = data[0]
     in_size = g.ndata['feat'].shape[1]
-    if DATASET == 'PPI':
-        out_size = data.num_labels
-    else:
-        out_size = data.num_classes
+    out_size = data.num_classes
     train_mask = g.ndata['train_mask']
     train_ids = train_mask.nonzero().squeeze()
     val_mask = g.ndata["val_mask"]
@@ -148,22 +83,23 @@ else:
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--device', type=int, default=0)
-# parser.add_argument('--profiling', type=bool, default=False)
+parser.add_argument('--profiling', type=bool, default=False)
 args = parser.parse_args()
-# PROFILING  = args.profiling
+PROFILING  = args.profiling
 device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
 
 
 # 由metis或者顺序划分得到多个节点区间后，一次训练选择多少个节点区间
-num_partitions_per_it = BATCH_SIZE
+num_partitions_per_it = 1
+
+num_layers = 3
 
 if METIS_PARTITION:
     # Metis Partition
-    num_parts = NUM_PARTS
+    num_parts = 500
     part_dict = dgl.metis_partition(g, num_parts, reshuffle=True, 
     # balance_ntypes=g.ndata['train_mask']
     )
-    # 上面reshuffle=True，这里得到的batches已经是新的节点编号
     batches = [part_dict[i].ndata[dgl.NID] for i in range(num_parts)]
     original_ids = [part_dict[i].ndata['orig_id'] for i in range(num_parts)]
     new_order = torch.cat(original_ids, dim=0)
@@ -175,13 +111,16 @@ else:
     # Sequantial Partition
     num_nodes = g.num_nodes()
     # 每个partition内部的节点数量
-    num_nodes_per_part = 68
+    num_nodes_per_part = 2
     id_seq = torch.arange(num_nodes)
     # batches是一个batch list，每一个batch相当于一个partition
     batches = torch.split(id_seq, num_nodes_per_part)
 
 num_parts = len(batches)
 print("num_parts: {}".format(num_parts))
+
+
+
 
 class SubgraphConstructor(object):
     def __init__(self, g, num_layers):
@@ -222,18 +161,16 @@ def parse_args_from_block(block, training=True):
 
 criterion = torch.nn.CrossEntropyLoss()
 def train(model: GCN, loader, optimizer):
-    model.train()
+    # model.train()
 
     for it, blocks in enumerate(loader):
         block = blocks[0]
         out = model(block, *parse_args_from_block(block, training=True))
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
-        if ACCLOG:
-            writer.add_scalar('train_loss', loss, global_iter())
+        writer.add_scalar('train_loss', loss, global_iter())
         loss.backward()
-        if GRAD_NORM is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_NORM)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
 @torch.no_grad()
@@ -256,8 +193,9 @@ def test(model: GCN, g: dgl.DGLGraph):
     return train_acc, val_acc, test_acc
 
 
+
 def main():
-    constructor = SubgraphConstructor(g, NUM_LAYERS)
+    constructor = SubgraphConstructor(g, num_layers)
     subgraph_loader = DataLoader(
     dataset = batches,
     batch_size=num_partitions_per_it,
@@ -265,9 +203,6 @@ def main():
     shuffle=SHULFFLE_DATA
     )
 
-    # Get the dimension of node features in the graph.
-    in_size = g.ndata['feat'].size(dim=1)
-    print("in_size: {}".format(in_size))
     best_val_acc = test_acc = 0
     # Make use of the pre-defined GCN+GAS model:
     model = GCN(
@@ -275,14 +210,11 @@ def main():
         in_channels=in_size,
         hidden_channels=16,
         out_channels=out_size,
-        num_layers=NUM_LAYERS,
-        drop_input=DROP_INPUT,
-        dropout=DROPOUT,
-        batch_norm=BATCH_NORM,
-        residual=RESIDUAL,
-        linear=LINEAR,
-        pool_size=POOL_SIZE,  # Number of pinned CPU buffers
-        buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
+        num_layers=num_layers,
+        dropout=0.5,
+        drop_input=True,
+        pool_size=1,  # Number of pinned CPU buffers
+        buffer_size=2000,  # Size of pinned CPU buffers (max #out-of-batch nodes)
     ).to(device)
 
     if PROFILING:
@@ -294,10 +226,10 @@ def main():
     print("Fill History Time(s): {:.4f}".format(toc - tic))
 
     optimizer = torch.optim.Adam([
-        dict(params=model.reg_modules.parameters(), weight_decay=REG_WEIGHT_DECAY),
-        dict(params=model.nonreg_modules.parameters(), weight_decay=NONREG_WEIGHT_DECAY)
-    ], lr=LR)
-    for epoch in range(0, EPOCHS):
+        dict(params=model.reg_modules.parameters(), weight_decay=5e-4),
+        dict(params=model.nonreg_modules.parameters(), weight_decay=0)
+    ], lr=0.01)
+    for epoch in range(0, 200):
         with record_function("2: Train"):
             train(model, subgraph_loader, optimizer)
         with record_function("3: Test"):
@@ -305,10 +237,9 @@ def main():
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             test_acc = tmp_test_acc
-        if ACCLOG:
-            writer.add_scalar('Train Accuracy', train_acc, epoch)
-            writer.add_scalar('Val Accuracy', val_acc, epoch)
-            writer.add_scalar('Test Accuracy', tmp_test_acc, epoch)
+        writer.add_scalar('Train Accuracy', train_acc, epoch)
+        writer.add_scalar('Val Accuracy', val_acc, epoch)
+        writer.add_scalar('Test Accuracy', tmp_test_acc, epoch)
         
         print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
             f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
@@ -334,13 +265,13 @@ def debug():
         out_channels=2,
         num_layers=3,
         dropout=0,
-        drop_input=DROP_INPUT,
+        drop_input=False,
         pool_size=1,  # Number of pinned CPU buffers
-        buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
+        buffer_size=2000,  # Size of pinned CPU buffers (max #out-of-batch nodes)
     ).to(device)
 
 
-    constructor = SubgraphConstructor(g, NUM_LAYERS)
+    constructor = SubgraphConstructor(g, num_layers)
     subgraph_loader = DataLoader(
     dataset = batches,
     batch_size=num_partitions_per_it,

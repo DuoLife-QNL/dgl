@@ -92,7 +92,7 @@ def train(args, g, features, labels, masks, model):
                 epoch, loss.item(), micro_f1
             )
         )
-        writer.add_scalar('Micro-F1', micro_f1, epoch)
+        writer.add_scalar('Test Accuracy', micro_f1, epoch)
         # prof.step()
     # prof.stop()
 
