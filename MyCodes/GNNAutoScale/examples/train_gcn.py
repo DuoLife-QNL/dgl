@@ -166,15 +166,15 @@ def graph_partition(g, num_parts, partition_method = 'metis') -> List[torch.Tens
     return batches
 
 class SubgraphConstructor(object):
-    def __init__(self, g, num_layers, device):
+    def __init__(self, g, num_layers):
         self.g = g
         self.num_layers = num_layers
-        self.device = device
     
     def construct_subgraph(self, batches: Tuple[torch.Tensor]):
         IB_nodes = torch.cat(batches, dim=0)
         subgraph = dgl.in_subgraph(self.g, IB_nodes)
-        block = dgl.to_block(subgraph).to(self.device)
+        # block = dgl.to_block(subgraph).to(self.device)
+        block = dgl.to_block(subgraph)
         block.num_nodes_in_each_batch = torch.tensor([batch.size(dim=0) for batch in batches])
         return [block for _ in range(self.num_layers)]
 
@@ -203,12 +203,13 @@ def parse_args_from_block(block, training=True):
 
         return feat, num_output_nodes, n_ids, offset, count
 
-def train(model: GCN, loader, optimizer):
+def train(model: GCN, loader, optimizer, device):
     model.train()
 
     criterion = torch.nn.CrossEntropyLoss()
     for it, blocks in enumerate(loader):
         block = blocks[0]
+        block = block.to(device)
         out = model(block, *parse_args_from_block(block, training=True))
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
@@ -251,7 +252,7 @@ def main():
 
     batches = graph_partition(g, num_parts=NUM_PARTS, partition_method='metis')
 
-    constructor = SubgraphConstructor(g, NUM_LAYERS, device)
+    constructor = SubgraphConstructor(g, NUM_LAYERS)
     num_partitions_per_it = BATCH_SIZE
     subgraph_loader = DataLoader(
         dataset = batches,
@@ -290,7 +291,7 @@ def main():
     ], lr=LR)
     for epoch in range(0, EPOCHS):
         with record_function("2: Train"):
-            train(model, subgraph_loader, optimizer)
+            train(model, subgraph_loader, optimizer, device)
         with record_function("3: Test"):
             train_acc, val_acc, tmp_test_acc = test(model, g, device)
         if val_acc > best_val_acc:
