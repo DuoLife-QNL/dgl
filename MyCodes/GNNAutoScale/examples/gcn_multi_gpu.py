@@ -3,11 +3,14 @@ from math import ceil
 import time
 import sys
 import torch
+import torch.distributed as dist
 
 from torch_autoscale.models import GCN
 from torch_autoscale import compute_micro_f1
 
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from typing import List, Tuple
 
@@ -25,6 +28,7 @@ from dgl.data import FlickrDataset
 import pdb
 
 from dgl.dataloading import NeighborSampler, MultiLayerFullNeighborSampler
+import torch.multiprocessing as mp
 
 # profiling tools
 import torch.profiler
@@ -39,6 +43,8 @@ SHULFFLE_DATA = True
 PROFILING = False
 # Accuracy convergence logging in Tensorboard
 ACCLOG = False
+# Multi-GPU Settings
+GPU = '0,1,2,3'
 
 # Hyperparameters
 DATASET = 'Cora'
@@ -128,7 +134,7 @@ def load_dataset(dataset_name: str) -> DGLBuiltinDataset:
 
     return data
 
-def retrieve_dataset_info(data: DGLBuiltinDataset):
+def retrieve_dataset_info(data: DGLBuiltinDataset) -> Tuple[dgl.DGLGraph, int, int, torch.Tensor, torch.Tensor, torch.Tensor]:
     g = data[0]
     num_classes = data.num_classes
     in_size = g.ndata['feat'].shape[1]
@@ -203,12 +209,12 @@ def parse_args_from_block(block, training=True):
 
         return feat, num_output_nodes, n_ids, offset, count
 
-def train(model: GCN, loader, optimizer):
+def train(model: GCN, loader, optimizer, device):
     model.train()
 
     criterion = torch.nn.CrossEntropyLoss()
     for it, blocks in enumerate(loader):
-        block = blocks[0]
+        block = blocks[0].to(device)
         out = model(block, *parse_args_from_block(block, training=True))
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
@@ -238,26 +244,37 @@ def test(model: GCN, g: dgl.DGLGraph, device):
 
     return train_acc, val_acc, test_acc
 
+# The first argument is given by mp.spawn automatically, which indicates the process id
+# In single machine mode, rank == local_rank == device id
+# This needs correction to scale up the code to multi machine
+def run(rank, world_size, devices: List[int], dataset_info):
+    dist_init_method = "tcp://{master_ip}:{master_port}".format(
+        master_ip="127.0.0.1", master_port="12345"
+    )
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=int, default=0)
-    args = parser.parse_args()
+    dist.init_process_group(
+        backend='nccl',
+        rank=rank,
+        world_size=world_size,
+        init_method=dist_init_method
+    )
+    local_rank = dev_id = devices[rank]
+    torch.cuda.set_device(dev_id)
+    device = f'cuda:{dev_id}'
 
-    device = f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu'
-
-    data = load_dataset(DATASET)
-    g, in_size, out_size, train_mask, val_mask, labels = retrieve_dataset_info(data)
-
-    batches = graph_partition(g, num_parts=NUM_PARTS, partition_method='metis')
+    g, batches, in_size, out_size, train_mask, val_mask, labels = dataset_info
 
     constructor = SubgraphConstructor(g, NUM_LAYERS, device)
-    num_partitions_per_it = BATCH_SIZE
+
+    dist_sampler = DistributedSampler(dataset=batches, shuffle=True)
+
+    # In GAS, batch-size is difined as the number of partitions per iteration
+    batch_size = BATCH_SIZE
     subgraph_loader = DataLoader(
         dataset = batches,
-        batch_size=num_partitions_per_it,
+        batch_size=batch_size,
         collate_fn = constructor.construct_subgraph,
-        shuffle=SHULFFLE_DATA
+        sampler=dist_sampler
     )
 
     best_val_acc = test_acc = 0
@@ -276,39 +293,68 @@ def main():
         buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
     ).to(device)
 
+    model = DDP(model, device_ids=[dev_id], output_device=dev_id)
+
     if PROFILING:
         prof.start()
 
     tic = time.time()
-    test(model, g, device) # Fill the history.
+    if dist.get_rank() == 0:
+        # Fill the history.
+        test(model, g, device) 
+    dist.barrier()
     toc = time.time()
     print("Fill History Time(s): {:.4f}".format(toc - tic))
 
-    optimizer = torch.optim.Adam([
-        dict(params=model.reg_modules.parameters(), weight_decay=REG_WEIGHT_DECAY),
-        dict(params=model.nonreg_modules.parameters(), weight_decay=NONREG_WEIGHT_DECAY)
-    ], lr=LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     for epoch in range(0, EPOCHS):
-        with record_function("2: Train"):
-            train(model, subgraph_loader, optimizer)
-        with record_function("3: Test"):
-            train_acc, val_acc, tmp_test_acc = test(model, g, device)
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            test_acc = tmp_test_acc
-        if ACCLOG:
-            writer.add_scalar('Train Accuracy', train_acc, epoch)
-            writer.add_scalar('Val Accuracy', val_acc, epoch)
-            writer.add_scalar('Test Accuracy', tmp_test_acc, epoch)
-        
-        print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
-            f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
+        dist_sampler.set_epoch(epoch)
         if PROFILING:
-            prof.step()
+            with record_function("2: Train"):
+                train(model, subgraph_loader, optimizer, device)
+            with record_function("3: Test"):
+                train_acc, val_acc, tmp_test_acc = test(model, g, device)
+        else:
+            train(model, subgraph_loader, optimizer, device)
+            train_acc, val_acc, tmp_test_acc = test(model, g, device)
+        
+        if rank == 0:
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                test_acc = tmp_test_acc
+            if ACCLOG:
+                writer.add_scalar('Train Accuracy', train_acc, epoch)
+                writer.add_scalar('Val Accuracy', val_acc, epoch)
+                writer.add_scalar('Test Accuracy', tmp_test_acc, epoch)
+            
+            print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
+                f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
+            if PROFILING:
+                prof.step()
+        
+        dist.barrier()
 
     if PROFILING:
         prof.stop()
         print(prof.key_averages().table(sort_by="cpu_time_total"))
+    
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--device', type=int, default=0)
+    args = parser.parse_args()
+    
+    devices = list(map(int, GPU.split(',')))
+    n_gpus = len(devices)
+
+    data = load_dataset(DATASET)
+    g, in_size, out_size, train_mask, val_mask, labels = retrieve_dataset_info(data)
+    batches = graph_partition(g, num_parts=NUM_PARTS, partition_method='metis')
+    dataset_info = (g, batches, in_size, out_size, train_mask, val_mask, labels)
+    g.create_formats_()
+
+
+    mp.spawn(run, args=(n_gpus, devices, dataset_info), nprocs=n_gpus)
 
 
 if __name__ == '__main__':
