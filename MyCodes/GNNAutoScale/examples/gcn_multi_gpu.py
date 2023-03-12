@@ -215,7 +215,8 @@ def train(model: GCN, loader, optimizer, device):
     criterion = torch.nn.CrossEntropyLoss()
     for it, blocks in enumerate(loader):
         block = blocks[0].to(device)
-        out = model(block, *parse_args_from_block(block, training=True))
+        args = parse_args_from_block(block, training=True)
+        out = model(block, *args)
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
         if ACCLOG:
@@ -293,18 +294,20 @@ def run(rank, world_size, devices: List[int], dataset_info):
         buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
     ).to(device)
 
-    model = DDP(model, device_ids=[dev_id], output_device=dev_id)
 
     if PROFILING:
         prof.start()
 
-    tic = time.time()
     if dist.get_rank() == 0:
-        # Fill the history.
+        tic = time.time()
+        # Fill the history. Here the model must not be the DDP version.
         test(model, g, device) 
+        toc = time.time()
+        print("Fill History Time(s): {:.4f}".format(toc - tic))
     dist.barrier()
-    toc = time.time()
-    print("Fill History Time(s): {:.4f}".format(toc - tic))
+
+    # Transform the model to DDP version
+    model = DDP(model, device_ids=[dev_id], output_device=dev_id)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     for epoch in range(0, EPOCHS):

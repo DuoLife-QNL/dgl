@@ -32,6 +32,9 @@ class History(torch.nn.Module):
     def pull(self, n_id: Optional[Tensor] = None) -> Tensor:
         out = self.emb
         if n_id is not None:
+            n_id = n_id.to(self.emb.device)
+            # Under pytorch DDP, all input tensors (including n_id) is moved 
+            # to the GPU of the current process by DDP, and this assertion will fail.
             assert n_id.device == self.emb.device
             out = out.index_select(0, n_id)
         return out.to(device=self._device)

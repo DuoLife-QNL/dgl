@@ -210,7 +210,8 @@ def train(model: GCN, loader, optimizer, device):
     for it, blocks in enumerate(loader):
         block = blocks[0]
         block = block.to(device)
-        out = model(block, *parse_args_from_block(block, training=True))
+        args = parse_args_from_block(block, training=True)
+        out = model(block, *args)
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
         if ACCLOG:
