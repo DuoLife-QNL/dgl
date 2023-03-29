@@ -6,7 +6,7 @@ from torchmetrics.functional.classification import multiclass_f1_score
 import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
-from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset
+from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset, RedditDataset
 from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborSampler
 from ogb.nodeproppred import DglNodePropPredDataset
 import tqdm
@@ -16,13 +16,29 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from math import ceil
 
+PROFILING = False
+
+PROF_PATH = '/home/lihz/Codes/dgl/MyCodes/Profiling/GraphSAGE-MB-NS/SAGEConv/Default'
 # Initiate profiler
-prof = profile(
+on_trace_ready = None
+if PROFILING:
+    on_trace_ready = torch.profiler.tensorboard_trace_handler(PROF_PATH)
+prof = torch.profiler.profile(
     activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-    record_shapes=True
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+    on_trace_ready=on_trace_ready,
+    record_shapes=True,
+    with_stack=True,
+    with_modules=True
+)
+prof.schedule = torch.profiler.schedule(
+        skip_first=1,
+        wait=1, 
+        warmup=1,
+        active=2, 
+        repeat=2
 )
 
 torch.manual_seed(5828)
@@ -116,9 +132,6 @@ def train(args, device, g, dataset, model):
     #                           prefetch_labels=['label'])
     batch_size = args.batch_size
     steps_per_epoch = ceil(n_train_nodes / batch_size)
-    # prof.schedule = torch.profiler.schedule(
-    #     wait=steps_per_epoch, warmup=steps_per_epoch,
-    #     active=10*steps_per_epoch, repeat=1)
     sampler = NeighborSampler([25, 10],  # fanout for [layer-0, layer-1]
                               prefetch_node_feats=['feat'],
                               prefetch_labels=['label'])
@@ -136,13 +149,19 @@ def train(args, device, g, dataset, model):
 
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
 
-    # prof.start()
+    prof.start()
     for epoch in range(args.num_epochs):
         model.train()
         total_loss = 0
         for it, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
             x = blocks[0].srcdata['feat']
             y = blocks[-1].dstdata['label']
+            # get the input size and output size of each block
+            for block in blocks:
+                block_input_node_number = block.number_of_src_nodes()
+                block_output_node_number = block.number_of_dst_nodes()
+                block_nedges = block.number_of_edges()
+                print("number of epoch: {}, number of iteration: {}, block_input_node_number: {}, block_output_node_number: {}, block_nedges: {}".format(epoch, it, block_input_node_number, block_output_node_number, block_nedges))
             with record_function("Forward Computation"):
                 y_hat = model(blocks, x)
             loss = F.cross_entropy(y_hat, y)
@@ -150,13 +169,12 @@ def train(args, device, g, dataset, model):
             loss.backward()
             opt.step()
             total_loss += loss.item()
-            # prof.step()
-            # print(it)
+            prof.step()
         micro_f1 = evaluate(model, g, val_dataloader)
 
         print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
               .format(epoch, total_loss / (it+1), micro_f1))
-    # prof.stop()
+    prof.stop()
     # print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time"))
 
 if __name__ == '__main__':
@@ -166,10 +184,10 @@ if __name__ == '__main__':
     #                     help="Training mode. 'cpu' for CPU training, 'mixed' for CPU-GPU mixed training, "
     #                          "'puregpu' for pure-GPU training."
     # )
-    parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
+    parser.add_argument("--num-hidden", type=int, default=256, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=30)
-    parser.add_argument("--num-epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=38000)
+    parser.add_argument("--num-epochs", type=int, default=20)
     args = parser.parse_args()
     # if not torch.cuda.is_available():
     #     args.mode = 'cpu'
@@ -182,7 +200,8 @@ if __name__ == '__main__':
     print('Loading data')
     # dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-products'))
     # dataset = CiteseerGraphDataset(transform=AddSelfLoop())
-    dataset = CoraGraphDataset(transform=AddSelfLoop())
+    # dataset = CoraGraphDataset(transform=AddSelfLoop())
+    dataset = RedditDataset(transform=AddSelfLoop())
     g = dataset[0]
     # g = g.to('cuda' if args.mode == 'puregpu' else 'cpu')
     g = g.to('cpu')

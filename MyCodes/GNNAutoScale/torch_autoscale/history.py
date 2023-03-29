@@ -32,6 +32,7 @@ class History(torch.nn.Module):
     def pull(self, n_id: Optional[Tensor] = None) -> Tensor:
         out = self.emb
         if n_id is not None:
+            # Move the n_id to device of embeddings for correctly run under pytorch DDP
             n_id = n_id.to(self.emb.device)
             # Under pytorch DDP, all input tensors (including n_id) is moved 
             # to the GPU of the current process by DDP, and this assertion will fail.

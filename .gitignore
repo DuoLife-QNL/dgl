@@ -172,3 +172,6 @@ config.cmake
 
 # profiling
 MyCodes/Profiling/
+
+# Obj temp storage
+*.pickle

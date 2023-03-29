@@ -1,12 +1,15 @@
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict
 
 import warnings
+import tqdm
 
 import torch
 from torch import Tensor
 
 from torch_autoscale import History, AsyncIOPool
-# from torch_autoscale import SubgraphLoader, EvalSubgraphLoader
+from torch.utils.data import DataLoader as TorchDataLoader
+
+import dgl
 from dgl.heterograph import DGLBlock
 
 
@@ -156,7 +159,7 @@ class ScalableGNN(torch.nn.Module):
 
         return out
 
-    def push_and_pull(self, history, x: Tensor,
+    def push_and_pull(self, history: History, x: Tensor,
                       batch_size: Optional[int] = None,
                       n_id: Optional[Tensor] = None,
                       offset: Optional[Tensor] = None,
@@ -188,6 +191,14 @@ class ScalableGNN(torch.nn.Module):
             out = torch.cat([x[:batch_size], out], dim=0)
             self.pool.free_pull()
             return out
+        
+    def history_pull(self, history: History, n_id: Tensor) -> Tensor:
+        """ 
+        Pulls information from history
+        Note that hitory is of one layer
+        """
+
+        return history.pull(n_id)
 
     @property
     def _out(self):
@@ -196,63 +207,44 @@ class ScalableGNN(torch.nn.Module):
                                      pin_memory=True)
         return self.__out
 
-    # @torch.no_grad()
-    # def mini_inference(self, loader: SubgraphLoader) -> Tensor:
-    #     r"""An implementation of layer-wise evaluation of GNNs.
-    #     For each individual layer and mini-batch, :meth:`forward_layer` takes
-    #     care of computing the next state of node embeddings.
-    #     Additional state (such as residual connections) can be stored in
-    #     a `state` directory."""
-
-    #     # We iterate over the loader in a layer-wise fashsion.
-    #     # In order to re-use some intermediate representations, we maintain a
-    #     # `state` dictionary for each individual mini-batch.
-
-    #     loader = [sub_data + ({}, ) for sub_data in loader]
-
-    #     # We push the outputs of the first layer to the history:
-    #     for data, batch_size, n_id, offset, count, state in loader:
-    #         x = data.x.to(self.device)
-    #         adj_t = data.adj_t.to(self.device)
-    #         out = self.forward_layer(0, x, adj_t, state)[:batch_size]
-    #         self.pool.async_push(out, offset, count, self.histories[0].emb)
-    #     self.pool.synchronize_push()
-
-    #     for i in range(1, len(self.histories)):
-    #         # Pull the complete layer-wise history:
-    #         for _, batch_size, n_id, offset, count, _ in loader:
-    #             self.pool.async_pull(self.histories[i - 1].emb, offset, count,
-    #                                  n_id[batch_size:])
-
-    #         # Compute new output embeddings one-by-one and start pushing them
-    #         # to the history.
-    #         for batch, batch_size, n_id, offset, count, state in loader:
-    #             adj_t = batch.adj_t.to(self.device)
-    #             x = self.pool.synchronize_pull()[:n_id.numel()]
-    #             out = self.forward_layer(i, x, adj_t, state)[:batch_size]
-    #             self.pool.async_push(out, offset, count, self.histories[i].emb)
-    #             self.pool.free_pull()
-    #         self.pool.synchronize_push()
-
-    #     # We pull the histories from the last layer:
-    #     for _, batch_size, n_id, offset, count, _ in loader:
-    #         self.pool.async_pull(self.histories[-1].emb, offset, count,
-    #                              n_id[batch_size:])
-
-    #     # And compute final output embeddings, which we write into a private
-    #     # output embedding matrix:
-    #     for batch, batch_size, n_id, offset, count, state in loader:
-    #         adj_t = batch.adj_t.to(self.device)
-    #         x = self.pool.synchronize_pull()[:n_id.numel()]
-    #         out = self.forward_layer(self.num_layers - 1, x, adj_t,
-    #                                  state)[:batch_size]
-    #         self.pool.async_push(out, offset, count, self._out)
-    #         self.pool.free_pull()
-    #     self.pool.synchronize_push()
-
-    #     return self._out
 
     @torch.no_grad()
-    def forward_layer(self, layer: int, g, x: Tensor,
-                      state: Dict[str, Any]) -> Tensor:
+    def layerwise_inference(self, g: dgl.DGLGraph, feat: Tensor, node_batch_size: int, 
+                            out_channels: int, device):
+        """
+        Perform the full-graph inference layer by layer.
+        
+        Arg: 
+            node_batch_size: The number of nodes in a batch, different from the number of partitions 
+                used in training.
+        """
+        nodes = torch.arange(g.number_of_nodes())
+        ys = []
+        for l in range(self.num_layers):
+            y = torch.zeros(
+                g.number_of_nodes(),
+                self.hidden_channels if l != self.num_layers - 1 else out_channels,
+            )
+
+            for start in range(0, len(nodes), node_batch_size):
+                end = start + node_batch_size
+                batch_nodes = nodes[start:end]
+                block = dgl.to_block(
+                    dgl.in_subgraph(g, batch_nodes), batch_nodes
+                )
+                block = block.int().to(device)
+                induced_nodes = block.srcdata[dgl.NID]
+                feat = feat.to(device)
+
+                h = feat[induced_nodes]
+                h = self.forward_layer(l, block, h)
+
+                y[start:end] = h.cpu()
+
+            ys.append(y)
+            feat = y
+        return y, ys       
+
+    @torch.no_grad()
+    def forward_layer(self, layer_number: int, block: DGLBlock, h: Tensor):
         raise NotImplementedError

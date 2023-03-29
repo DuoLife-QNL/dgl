@@ -15,6 +15,8 @@
 #
 """Functional interface for transform"""
 
+import time
+
 from collections.abc import Iterable, Mapping
 from collections import defaultdict
 import copy
@@ -2352,6 +2354,17 @@ def to_block(g, dst_nodes=None, include_dst_in_src=True, src_nodes=None):
     --------
     create_block
     """
+    src_nodes_size = dst_nodes_size = None
+    if dst_nodes is not None:
+        dst_nodes_size = dst_nodes.size()
+    if src_nodes is not None:
+        src_nodes_size = src_nodes.size()
+    print(
+        "Performing to_block(), graph_n_src_nodes: {}, graph_n_dst_nodes: {}, graph_nedges: {} src_nodes_size: {}, dst_nodes_size: {}".format(
+            g.number_of_src_nodes(), g.number_of_dst_nodes(), g.number_of_edges(),  src_nodes_size, dst_nodes_size
+        )
+    )
+    tic = time.time()
     if dst_nodes is None:
         # Find all nodes that appeared as destinations
         dst_nodes = defaultdict(list)
@@ -2396,9 +2409,10 @@ def to_block(g, dst_nodes=None, include_dst_in_src=True, src_nodes=None):
     else:
         # use an empty list to signal we need to generate it
         src_node_ids_nd = []
-
+    tic_capi_dgltoblock = time.time()
     new_graph_index, src_nodes_ids_nd, induced_edges_nd = _CAPI_DGLToBlock(
         g._graph, dst_node_ids_nd, include_dst_in_src, src_node_ids_nd)
+    toc_capi_dgltoblock = time.time()
 
     # The new graph duplicates the original node types to SRC and DST sets.
     new_ntypes = (g.ntypes, g.ntypes)
@@ -2412,6 +2426,8 @@ def to_block(g, dst_nodes=None, include_dst_in_src=True, src_nodes=None):
     edge_frames = utils.extract_edge_subframes(g, edge_ids)
     utils.set_new_frames(new_graph, node_frames=node_frames, edge_frames=edge_frames)
 
+    toc = time.time()
+    print("to_block() time: {:4f}, CAPI_DGLToBlock time : {:4f}".format(toc - tic, toc_capi_dgltoblock - tic_capi_dgltoblock))
     return new_graph
 
 def _coalesce_edge_frame(g, edge_maps, counts, aggregator):

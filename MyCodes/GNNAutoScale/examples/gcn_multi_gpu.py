@@ -47,19 +47,19 @@ ACCLOG = False
 GPU = '0,1,2,3'
 
 # Hyperparameters
-DATASET = 'Cora'
-SELF_LOOP = False
+DATASET = 'Reddit'
+SELF_LOOP = True
 # GCN Norm is set to True ('both' in GraphConv) by default
 NUM_LAYERS = 2
-HIDDEN_CHANNELS = 16
+HIDDEN_CHANNELS = 256
 DROPOUT = 0.5
-NUM_PARTS = 40
-BATCH_SIZE = 10
+NUM_PARTS = 200
+BATCH_SIZE = 50
 LR = 0.01
-REG_WEIGHT_DECAY = 5e-4
+REG_WEIGHT_DECAY = 0.0
 NONREG_WEIGHT_DECAY = 0.0
-GRAD_NORM = 1.0
-EPOCHS = 200
+GRAD_NORM = None
+EPOCHS = 2400
 
 """
 for small datasets, the following settings should be default:
@@ -69,7 +69,7 @@ RESIDUAL = False
 LINEAR = False
 POOL_SIZE = None
 """
-DROP_INPUT = True
+DROP_INPUT = False
 BATCH_NORM = False
 RESIDUAL = False
 LINEAR = False
@@ -229,6 +229,7 @@ def train(model: GCN, loader, optimizer, device):
 @torch.no_grad()
 def test(model: GCN, g: dgl.DGLGraph, device):
     model.eval()
+    model = model.to(device)
 
     block = dgl.to_block(g).to(device)
     feat = block.srcdata['feat']
@@ -239,6 +240,29 @@ def test(model: GCN, g: dgl.DGLGraph, device):
     
     # Full-batch inference since the graph is small
     out = model(block, feat).cpu()
+    train_acc = compute_micro_f1(out, labels, train_mask)
+    val_acc = compute_micro_f1(out, labels, val_mask)
+    test_acc = compute_micro_f1(out, labels, test_mask)
+
+    return train_acc, val_acc, test_acc
+
+@torch.no_grad()
+def layerwise_minibatch_test(model: GCN, g: dgl.DGLGraph, out_size: int, device):
+    model.eval()
+
+    block = dgl.to_block(g)
+    feat = block.srcdata['feat']
+    labels = block.srcdata['label'].cpu()
+    train_mask = block.srcdata['train_mask'].cpu()
+    val_mask = block.srcdata['val_mask'].cpu()
+    test_mask = block.srcdata['test_mask'].cpu()
+    
+    num_total_nodes = g.num_nodes()
+    num_partitions_per_it = BATCH_SIZE
+    num_partitions = NUM_PARTS
+    node_batch_size = num_partitions_per_it * (num_total_nodes // num_partitions)
+    out, _ = model.layerwise_inference(g, feat, node_batch_size, out_size, device)
+
     train_acc = compute_micro_f1(out, labels, train_mask)
     val_acc = compute_micro_f1(out, labels, val_mask)
     test_acc = compute_micro_f1(out, labels, test_mask)
@@ -298,16 +322,26 @@ def run(rank, world_size, devices: List[int], dataset_info):
     if PROFILING:
         prof.start()
 
-    if dist.get_rank() == 0:
-        tic = time.time()
-        # Fill the history. Here the model must not be the DDP version.
-        test(model, g, device) 
-        toc = time.time()
-        print("Fill History Time(s): {:.4f}".format(toc - tic))
-    dist.barrier()
-
+    # device_cpu = 'cpu'
+    # if dist.get_rank() == 0:
+    #     tic = time.time()
+    #     # set the device as CPU
+    #     # Fill the history. Here the model must not be the DDP model.
+    #     # test(model, g, device)
+    #     # Test on CPU
+    #     model_cpu = model.to(device_cpu)
+    #     test(model_cpu, g, device_cpu) 
+    #     toc = time.time()
+    #     print("Fill History Time(s): {:.4f}".format(toc - tic))
+    # dist.barrier()
+    model = model.to(device)
     # Transform the model to DDP version
-    model = DDP(model, device_ids=[dev_id], output_device=dev_id)
+    model = DDP(
+        model, 
+        device_ids=[dev_id], 
+        output_device=dev_id, 
+        find_unused_parameters=True
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     for epoch in range(0, EPOCHS):
@@ -319,7 +353,9 @@ def run(rank, world_size, devices: List[int], dataset_info):
                 train_acc, val_acc, tmp_test_acc = test(model, g, device)
         else:
             train(model, subgraph_loader, optimizer, device)
-            train_acc, val_acc, tmp_test_acc = test(model, g, device)
+            # train_acc, val_acc, tmp_test_acc = test(model, g, device)
+            train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(model, g, out_size, device)
+
         
         if rank == 0:
             if val_acc > best_val_acc:

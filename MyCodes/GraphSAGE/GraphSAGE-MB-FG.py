@@ -6,7 +6,7 @@ from torchmetrics.functional.classification import multiclass_f1_score
 import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
-from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset
+from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset, RedditDataset
 from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborSampler
 from ogb.nodeproppred import DglNodePropPredDataset
 import tqdm
@@ -16,28 +16,40 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from math import ceil
 
-# Initiate profiler
-prof = profile(
-    activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-    record_shapes=True
-)
-from torch.utils.tensorboard import SummaryWriter
+PROFILING = False
 
-writer = SummaryWriter('/home/lihz/Codes/dgl/MyCodes/Profiling/GraphSAGE/tensorboard/MB_FG')
+PROF_PATH = '/home/lihz/Codes/dgl/MyCodes/Profiling/GraphSAGE-MB-FG/SAGEConv/Default'
+# Initiate profiler
+prof = torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
+    on_trace_ready=torch.profiler.tensorboard_trace_handler(PROF_PATH),
+    record_shapes=True,
+    with_stack=True,
+    with_modules=True
+)
+# if PROFILING:
+prof.schedule = torch.profiler.schedule(
+        skip_first=1,
+        wait=1, 
+        warmup=1,
+        active=2, 
+        repeat=2
+)
+
 torch.manual_seed(1234)
 class SAGE(nn.Module):
     def __init__(self, in_size, hid_size, out_size):
         super().__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(dglnn.GraphConv(in_size, hid_size))
-        self.layers.append(dglnn.GraphConv(hid_size, hid_size))
-        self.layers.append(dglnn.GraphConv(hid_size, out_size))
-        # self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'mean'))
-        # self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'mean'))
-        # self.dropout = nn.Dropout(0.5)
+        # self.layers.append(dglnn.GraphConv(in_size, hid_size))
+        # self.layers.append(dglnn.GraphConv(hid_size, hid_size))
+        # self.layers.append(dglnn.GraphConv(hid_size, out_size))
+        self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'gcn'))
+        self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'gcn'))
+        self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
 
@@ -121,9 +133,6 @@ def train(args, device, g, dataset, model):
     #                           prefetch_labels=['label'])
     batch_size = args.batch_size
     steps_per_epoch = ceil(n_train_nodes / batch_size)
-    # prof.schedule = torch.profiler.schedule(
-    #     wait=steps_per_epoch, warmup=steps_per_epoch,
-    #     active=10*steps_per_epoch, repeat=1)]
     sampler = MultiLayerFullNeighborSampler(2, prefetch_node_feats=['feat'], prefetch_labels=['label'])
     use_uva = True
     train_dataloader = DataLoader(g, train_idx, sampler, device=device,
@@ -138,12 +147,18 @@ def train(args, device, g, dataset, model):
 
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
 
-    # prof.start()
+    prof.start()
     for epoch in range(args.num_epochs):
         model.train()
         total_loss = 0
+        stop_barrier = 30
         for it, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
             # print(it)
+            for block in blocks:
+                block_input_node_number = block.number_of_src_nodes()
+                block_output_node_number = block.number_of_dst_nodes()
+                block_nedges = block.number_of_edges()
+                print("number of epoch: {}, number of iteration: {}, block_input_node_number: {}, block_output_node_number: {}, block_nedges: {}".format(epoch, it, block_input_node_number, block_output_node_number, block_nedges))
             x = blocks[0].srcdata['feat']
             y = blocks[-1].dstdata['label']
             with record_function("Forward Computation"):
@@ -153,15 +168,17 @@ def train(args, device, g, dataset, model):
             loss.backward()
             opt.step()
             total_loss += loss.item()
-            # prof.step()
+            prof.step()
             # print(it)
-        micro_f1 = evaluate(model, g, val_dataloader)
-        writer.add_scalar('Micro-F1', micro_f1, epoch)
-        writer.add_scalar('Test Accuracy', micro_f1, epoch)
+            if it == stop_barrier:
+                break
+        # micro_f1 = evaluate(model, g, val_dataloader)
+        # writer.add_scalar('Micro-F1', micro_f1, epoch)
+        # writer.add_scalar('Test Accuracy', micro_f1, epoch)
 
-        print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
-              .format(epoch, total_loss / (it+1), micro_f1))
-    # prof.stop()
+        # print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
+        #       .format(epoch, total_loss / (it+1), micro_f1))
+    prof.stop()
     # print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time"))
 
 if __name__ == '__main__':
@@ -171,10 +188,10 @@ if __name__ == '__main__':
     #                     help="Training mode. 'cpu' for CPU training, 'mixed' for CPU-GPU mixed training, "
     #                          "'puregpu' for pure-GPU training."
     # )
-    parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
+    parser.add_argument("--num-hidden", type=int, default=256, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=35)
-    parser.add_argument("--num-epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=10)
+    parser.add_argument("--num-epochs", type=int, default=1)
     args = parser.parse_args()
     # if not torch.cuda.is_available():
     #     args.mode = 'cpu'
@@ -187,7 +204,8 @@ if __name__ == '__main__':
     print('Loading data')
     # dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-products'))
     # dataset = CiteseerGraphDataset(transform=AddSelfLoop())
-    dataset = CoraGraphDataset(transform=AddSelfLoop())
+    # dataset = CoraGraphDataset(transform=AddSelfLoop())
+    dataset = RedditDataset(transform=AddSelfLoop())
     g = dataset[0]
     # g = g.to('cuda' if args.mode == 'puregpu' else 'cpu')
     g = g.to('cpu')

@@ -1,5 +1,7 @@
 from typing import Optional
 
+import time
+
 import torch
 from torch import Tensor
 import torch.nn.functional as F
@@ -69,37 +71,6 @@ class GCN(ScalableGNN):
         for bn in self.bns:
             bn.reset_parameters()
 
-    # def forward(self, x: Tensor, adj_t: SparseTensor, *args) -> Tensor:
-    #     if self.drop_input:
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     if self.linear:
-    #         x = self.lins[0](x).relu_()
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     for conv, bn, hist in zip(self.convs[:-1], self.bns, self.histories):
-    #         h = conv(x, adj_t)
-    #         if self.batch_norm:
-    #             h = bn(h)
-    #         if self.residual and h.size(-1) == x.size(-1):
-    #             h += x[:h.size(0)]
-    #         x = h.relu_()
-    #         x = self.push_and_pull(hist, x, *args)
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     h = self.convs[-1](x, adj_t)
-
-    #     if not self.linear:
-    #         return h
-
-    #     if self.batch_norm:
-    #         h = self.bns[-1](h)
-    #     if self.residual and h.size(-1) == x.size(-1):
-    #         h += x[:h.size(0)]
-    #     h = h.relu_()
-    #     h = F.dropout(h, p=self.dropout, training=self.training)
-    #     return self.lins[1](h)
-
 
     def forward(self, block: DGLBlock, x: Tensor, *args) -> Tensor:
         if self.drop_input:
@@ -109,15 +80,17 @@ class GCN(ScalableGNN):
             x = self.lins[0](x).relu_()
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        for conv, bn, hist in zip(self.convs[:-1], self.bns, self.histories):
+        for num_layer, conv, bn, hist in zip(range(self.num_layers), self.convs[:-1], self.bns, self.histories):
             h = conv(block, x)
             if self.batch_norm:
                 h = bn(h)
             if self.residual and h.size(-1) == x.size(-1):
                 h += x[:h.size(0)]
             x = h.relu_()
-            # TODO: 这里调用push_and_pull()函数是怎么知道特征是哪一层的呢
+            tic = time.time()
             x = self.push_and_pull(hist, x, *args)
+            toc = time.time()
+            print("pull and push time for layer {}: {:4f}".format(num_layer, toc - tic))
             x = F.dropout(x, p=self.dropout, training=self.training)
         
         h = self.convs[-1](block, x)
@@ -133,55 +106,24 @@ class GCN(ScalableGNN):
         h = F.dropout(h, p=self.dropout, training=self.training)
         return self.lins[1](h)
 
-    # def forward(self, g, x: Tensor, *args) -> Tensor:
-    #     if self.drop_input:
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     if self.linear:
-    #         x = self.lins[0](x).relu_()
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     for conv, bn, hist in zip(self.convs[:-1], self.bns, self.histories):
-    #         h = conv(g, x)
-    #         if self.batch_norm:
-    #             h = bn(h)
-    #         if self.residual and h.size(-1) == x.size(-1):
-    #             h += x[:h.size(0)]
-    #         x = h.relu_()
-    #         x = self.push_and_pull(hist, x, *args)
-    #         x = F.dropout(x, p=self.dropout, training=self.training)
-
-    #     h = self.convs[-1](g, x)
-
-    #     if not self.linear:
-    #         return h
-
-    #     if self.batch_norm:
-    #         h = self.bns[-1](h)
-    #     if self.residual and h.size(-1) == x.size(-1):
-    #         h += x[:h.size(0)]
-    #     h = h.relu_()
-    #     h = F.dropout(h, p=self.dropout, training=self.training)
-    #     return self.lins[1](h)
-
     @torch.no_grad()
-    def forward_layer(self, layer, x, adj_t, state):
-        if layer == 0:
+    def forward_layer(self, layer_number: int, block: DGLBlock, feat: Tensor):
+        if layer_number == 0:
             if self.drop_input:
-                x = F.dropout(x, p=self.dropout, training=self.training)
+                feat = F.dropout(feat, p=self.dropout, training=self.training)
             if self.linear:
-                x = self.lins[0](x).relu_()
-                x = F.dropout(x, p=self.dropout, training=self.training)
+                feat = self.lins[0](feat).relu_()
+                feat = F.dropout(feat, p=self.dropout, training=self.training)
         else:
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            feat = F.dropout(feat, p=self.dropout, training=self.training)
+        
+        h = self.convs[layer_number](block, feat)
 
-        h = self.convs[layer](x, adj_t)
-
-        if layer < self.num_layers - 1 or self.linear:
+        if layer_number < self.num_layers - 1 or self.linear:
             if self.batch_norm:
-                h = self.bns[layer](h)
-            if self.residual and h.size(-1) == x.size(-1):
-                h += x[:h.size(0)]
+                h = self.bns[layer_number](h)
+            if self.residual and h.size(-1) == feat.size(-1):
+                h += feat[:h.size(0)]
             h = h.relu_()
 
         if self.linear:

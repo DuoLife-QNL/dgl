@@ -10,6 +10,9 @@ import torch.optim as optim
 import torch.profiler
 import tqdm
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+# writer = SummaryWriter()
+from torch.profiler import record_function
 
 import dgl
 import dgl.function as fn
@@ -146,20 +149,21 @@ class NeighborSampler(object):
         seeds = th.LongTensor(seeds)
         blocks = []
         hist_blocks = []
-        for fanout in self.fanouts:
-            # For each seed node, sample ``fanout`` neighbors.
-            frontier = dgl.sampling.sample_neighbors(self.g, seeds, fanout)
-            # Include all the neighbors of the seeds into hist_frontier
-            hist_frontier = dgl.in_subgraph(self.g, seeds)
-            # Then we compact the frontier into a bipartite graph for message passing.
-            block = dgl.to_block(frontier, seeds)
-            hist_block = dgl.to_block(hist_frontier, seeds)
-            # Obtain the seed nodes for next layer.
-            seeds = block.srcdata[dgl.NID]
+        with record_function('I: Sample Blocks'):
+            for fanout in self.fanouts:
+                # For each seed node, sample ``fanout`` neighbors.
+                frontier = dgl.sampling.sample_neighbors(self.g, seeds, fanout)
+                # Include all the neighbors of the seeds into hist_frontier
+                hist_frontier = dgl.in_subgraph(self.g, seeds)
+                # Then we compact the frontier into a bipartite graph for message passing.
+                block = dgl.to_block(frontier, seeds)
+                hist_block = dgl.to_block(hist_frontier, seeds)
+                # Obtain the seed nodes for next layer.
+                seeds = block.srcdata[dgl.NID]
 
-            # Insert block to the very first position
-            blocks.insert(0, block)
-            hist_blocks.insert(0, hist_block)
+                # Insert block to the very first position
+                blocks.insert(0, block)
+                hist_blocks.insert(0, hist_block)
         return blocks, hist_blocks
 
 
@@ -205,6 +209,8 @@ def load_subtensor(
         hist_col = "features" if i == 0 else "hist_%d" % i
         block.srcdata["hist"] = g.ndata[hist_col][block.srcdata[dgl.NID]]
 
+        # Aggregate history
+        # with record_function("Aggregate History"):
         hist_block.srcdata["hist"] = g.ndata[hist_col][
             hist_block.srcdata[dgl.NID]
         ]
@@ -286,45 +292,126 @@ def run(args, dev_id, data):
     iter_tput = []
     steps_per_epoch = ceil(train_nid.size(0) / args.batch_size)
     print("Steps per epoch: {}".format(steps_per_epoch))
+    # Set pytorch profiler
+    prof = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        # schedule=torch.profiler.schedule(
+        #     wait=steps_per_epoch, warmup=steps_per_epoch,
+        #     active=10*steps_per_epoch, repeat=1),
+        # on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/VR-GCN-Single-GPU'),
+        record_shapes=True,
+        with_stack=True
+    )
+    prof.schedule = torch.profiler.schedule(
+            wait=steps_per_epoch, warmup=steps_per_epoch,
+            active=10*steps_per_epoch, repeat=1)
+    prof.start()
     for epoch in range(args.num_epochs):
         tic = time.time()
         model.train()
         tic_step = time.time()
+        # step = 0
+        # dataloader_iter = iter(dataloader)
+        # (blocks, hist_blocks) = next(dataloader_iter, (None, None))
+        # while (blocks, hist_blocks) != (None, None):
+        #     with record_function("1: Mini-batch"):
+        #         # The nodes for input lies at the LHS side of the first block.
+        #         # The nodes for output lies at the RHS side of the last block.
+        #         input_nodes = blocks[0].srcdata[dgl.NID]
+        #         seeds = blocks[-1].dstdata[dgl.NID]
+        #         # The blocks only contain node list now. We need to prepare the corresponding input node features and labels
+        #         # of the seed nodes. Besides, the aggregation result of the historical embeddings is computed.
+        #         # The blocks and hist_blocks are then sent to GPU.
+        #         with record_function("2: Construct Block & Aggregate Hist & Send to GPU"):
+        #             blocks, hist_blocks = load_subtensor(
+        #                 g, labels, blocks, hist_blocks, dev_id, True
+        #             )
+        #
+        #         # forward
+        #         with record_function("3: Computation"):
+        #             with record_function("3.1: Forward"):
+        #                 batch_pred = model(blocks)
+        #             # update history
+        #             with record_function("3.2: Update History"):
+        #                 update_history(g, blocks)
+        #             # compute loss
+        #             with record_function("3.3: Compute Loss"):
+        #                 batch_labels = blocks[-1].dstdata["label"]
+        #                 loss = loss_fcn(batch_pred, batch_labels)
+        #             # backward
+        #             with record_function('3.4: Backward'):
+        #                 optimizer.zero_grad()
+        #                 loss.backward()
+        #         with record_function('4: Update weights'):
+        #             optimizer.step()
+        #         iter_tput.append(len(seeds) / (time.time() - tic_step))
+        #         if step % args.log_every == 0:
+        #             acc = compute_acc(batch_pred, batch_labels)
+        #             # writer.add_scalar('Accuracy/train', acc, epoch)
+        #             print(
+        #                 "Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f}".format(
+        #                     epoch,
+        #                     step,
+        #                     loss.item(),
+        #                     acc.item(),
+        #                     np.mean(iter_tput[3:]),
+        #                 )
+        #             )
+        #         tic_step = time.time()
+        #         prof.step()
+        #         step += 1
         for step, (blocks, hist_blocks) in enumerate(dataloader):
-            # The nodes for input lies at the LHS side of the first block.
-            # The nodes for output lies at the RHS side of the last block.
-            input_nodes = blocks[0].srcdata[dgl.NID]
-            seeds = blocks[-1].dstdata[dgl.NID]
-            # The blocks only contain node list now. We need to prepare the corresponding input node features and labels
-            # of the seed nodes. Besides, the aggregation result of the historical embeddings is computed.
-            # The blocks and hist_blocks are then sent to GPU.
-            blocks, hist_blocks = load_subtensor(
-                g, labels, blocks, hist_blocks, dev_id, True
-            )
-
-            batch_pred = model(blocks)
-            update_history(g, blocks)
-            batch_labels = blocks[-1].dstdata["label"]
-            loss = loss_fcn(batch_pred, batch_labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            iter_tput.append(len(seeds) / (time.time() - tic_step))
-            if step % args.log_every == 0:
-                acc = compute_acc(batch_pred, batch_labels)
-                # writer.add_scalar('Accuracy/train', acc, epoch)
-                print(
-                    "Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f}".format(
-                        epoch,
-                        step,
-                        loss.item(),
-                        acc.item(),
-                        np.mean(iter_tput[3:]),
+            with record_function("II: Mini-batch"):
+                # The nodes for input lies at the LHS side of the first block.
+                # The nodes for output lies at the RHS side of the last block.
+                input_nodes = blocks[0].srcdata[dgl.NID]
+                seeds = blocks[-1].dstdata[dgl.NID]
+                # The blocks only contain node list now. We need to prepare the corresponding input node features and labels
+                # of the seed nodes. Besides, the aggregation result of the historical embeddings is computed.
+                # The blocks and hist_blocks are then sent to GPU.
+                with record_function("1: Construct Block & Aggregate Hist & Send to GPU"):
+                    blocks, hist_blocks = load_subtensor(
+                        g, labels, blocks, hist_blocks, dev_id, True
                     )
-                )
-            tic_step = time.time()
+
+                # forward
+                with record_function("2: Computation"):
+                    with record_function("2.1: Forward"):
+                        batch_pred = model(blocks)
+                    # update history
+                    with record_function("2.2: Update History"):
+                        update_history(g, blocks)
+                    # compute loss
+                    with record_function("2.3: Compute Loss"):
+                        batch_labels = blocks[-1].dstdata["label"]
+                        loss = loss_fcn(batch_pred, batch_labels)
+                    # backward
+                    with record_function('2.4: Backward'):
+                        optimizer.zero_grad()
+                        loss.backward()
+                with record_function('3: Update Weights'):
+                    optimizer.step()
+                iter_tput.append(len(seeds) / (time.time() - tic_step))
+                if step % args.log_every == 0:
+                    acc = compute_acc(batch_pred, batch_labels)
+                    # writer.add_scalar('Accuracy/train', acc, epoch)
+                    print(
+                        "Epoch {:05d} | Step {:05d} | Loss {:.4f} | Train Acc {:.4f} | Speed (samples/sec) {:.4f}".format(
+                            epoch,
+                            step,
+                            loss.item(),
+                            acc.item(),
+                            np.mean(iter_tput[3:]),
+                        )
+                    )
+                tic_step = time.time()
+                prof.step()
         toc = time.time()
         print("Epoch Time(s): {:.4f}".format(toc - tic))
+        # writer.add_scalar('Loss/train', loss, epoch)
         if epoch >= 5:
             avg += toc - tic
         model.eval()
@@ -334,7 +421,9 @@ def run(args, dev_id, data):
         # writer.add_scalar('Accuracy/test', eval_acc, epoch)
         if epoch % args.eval_every == 0 and epoch != 0:
             print("Eval Acc {:.4f}".format(eval_acc))
+    prof.stop()
     print("Avg epoch time: {}".format(avg / (epoch - 4)))
+    print(prof.key_averages().table(sort_by="cpu_time_total"))
 
 
 if __name__ == "__main__":
