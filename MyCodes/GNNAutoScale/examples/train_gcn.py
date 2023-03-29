@@ -24,7 +24,7 @@ from dgl.data import RedditDataset
 from dgl.data import PubmedGraphDataset
 from dgl.data import CoauthorCSDataset
 from dgl.data import WikiCSDataset
-from dgl.data import FlickrDatasetc
+from dgl.data import FlickrDataset
 import pdb
 
 from dgl.dataloading import NeighborSampler, MultiLayerFullNeighborSampler
