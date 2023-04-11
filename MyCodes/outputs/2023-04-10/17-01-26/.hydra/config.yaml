@@ -1,0 +1,32 @@
+dataset:
+  name: Reddit
+  metis_partition: true
+  shuffle_data: true
+  history_refresh: false
+  profiling: false
+  acclog: false
+  prof_path: /home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/GCN/default
+  part_path: /home/lihz/Codes/dgl/MyCodes/GNNAutoScale/PartitionedGraph
+  self_loop: true
+  num_layers: 2
+  hidden_channels: 256
+  dropout: 0.5
+  num_parts: 200
+  batch_size: 50
+  inference_batch_size: null
+  lr: 0.01
+  reg_weight_decay: 0.0
+  nonreg_weight_decay: 0.0
+  grad_norm: none
+  epochs: 400
+  test_every: 1
+  drop_input: false
+  batch_norm: false
+  residual: false
+  linear: false
+  pool_size: 2
+  buffer_size: null
+run_env:
+  device: 0
+training_method:
+  name: graphfm

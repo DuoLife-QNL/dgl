@@ -1,7 +1,11 @@
-from .base import ScalableGNN
+from .base import ScalableGNN, GASGNN, FMGNN
 from .gcn import GCN
+from .fmgcn import FMGCN
 
 __all__ = [
     'ScalableGNN',
-    'GCN'
+    'GASGNN',
+    'FMGNN',
+    'GCN',
+    'FMGCN'
 ]

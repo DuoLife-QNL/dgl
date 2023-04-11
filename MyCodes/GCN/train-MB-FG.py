@@ -8,18 +8,18 @@ import torch.nn.functional as F
 import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
-from dgl.data import CiteseerGraphDataset, CoraGraphDataset, PubmedGraphDataset, FlickrDataset
+from dgl.data import CiteseerGraphDataset, CoraGraphDataset, PubmedGraphDataset, FlickrDataset, RedditDataset
 from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborSampler
 
 from torchmetrics.functional.classification import multiclass_f1_score
 
 PROFILING = False
-DATASET = 'flickr'
+DATASET = 'reddit'
 SELF_LOOP = True
 NUM_LAYERS = 2
 HIDDEN_CHANNELS = 256
-DROPOUT = 0.3
-BATCH_SIZE = 500
+DROPOUT = 0.5
+BATCH_SIZE = 10
 LR = 0.01
 WEIGHT_DECAY = 0.0
 
@@ -164,10 +164,12 @@ if __name__ == "__main__":
         data = PubmedGraphDataset(transform=transform)
     elif DATASET == 'flickr':
         data = FlickrDataset(transform=transform)
+    elif DATASET == 'reddit':
+        data = RedditDataset(transform=transform)
     g = data[0]
     print(type(g))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.cuda.set_device(2)
+    torch.cuda.set_device(1)
     g = g.to(device)
     # g = g.int().to(device)
     features = g.ndata["feat"]

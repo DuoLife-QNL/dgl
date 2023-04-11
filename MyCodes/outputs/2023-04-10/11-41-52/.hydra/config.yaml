@@ -1,0 +1,3 @@
+dataset:
+  name: Citeseer
+  num_features: 3703

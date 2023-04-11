@@ -1,0 +1,4 @@
+defaults:
+  - dataset: Cora
+  - run_env: single_gpu
+  - training_method: gas

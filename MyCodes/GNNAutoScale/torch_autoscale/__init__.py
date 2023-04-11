@@ -15,7 +15,7 @@ for library in ['_relabel', '_async']:
         library, [osp.dirname(tmp)]).origin)
 
 # from .data import get_data  # noqa
-from .history import History  # noqa
+from .history import History, FMHistory  # noqa
 from .pool import AsyncIOPool  # noqa
 # from .metis import metis, permute  # noqa
 # from .utils import compute_micro_f1, gen_masks, dropout  # noqa
@@ -26,6 +26,7 @@ from .models import ScalableGNN
 __all__ = [
     'get_data',
     'History',
+    'FMHistory',
     'AsyncIOPool',
     'metis',
     'permute',

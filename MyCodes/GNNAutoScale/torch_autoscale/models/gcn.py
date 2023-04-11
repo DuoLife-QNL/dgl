@@ -8,11 +8,11 @@ import torch.nn.functional as F
 from torch.nn import ModuleList, Linear, BatchNorm1d
 import dgl
 import dgl.nn as dglnn
-from torch_autoscale.models import ScalableGNN
+from torch_autoscale.models import ScalableGNN, GASGNN
 from dgl.heterograph import DGLBlock
 
 
-class GCN(ScalableGNN):
+class GCN(GASGNN):
     def __init__(self, num_nodes: int, in_channels, hidden_channels: int,
                  out_channels: int, num_layers: int, dropout: float = 0.0,
                  drop_input: bool = True, batch_norm: bool = False,
@@ -72,36 +72,36 @@ class GCN(ScalableGNN):
             bn.reset_parameters()
 
 
-    def forward(self, block: DGLBlock, x: Tensor, *args) -> Tensor:
+    def forward(self, block_2IB: DGLBlock, feat: Tensor, *args) -> Tensor:
         if self.drop_input:
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            feat = F.dropout(feat, p=self.dropout, training=self.training)
 
         if self.linear:
-            x = self.lins[0](x).relu_()
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            feat = self.lins[0](feat).relu_()
+            feat = F.dropout(feat, p=self.dropout, training=self.training)
 
         for num_layer, conv, bn, hist in zip(range(self.num_layers), self.convs[:-1], self.bns, self.histories):
-            h = conv(block, x)
+            h = conv(block_2IB, feat)
             if self.batch_norm:
                 h = bn(h)
-            if self.residual and h.size(-1) == x.size(-1):
-                h += x[:h.size(0)]
-            x = h.relu_()
-            tic = time.time()
-            x = self.push_and_pull(hist, x, *args)
-            toc = time.time()
-            print("pull and push time for layer {}: {:4f}".format(num_layer, toc - tic))
-            x = F.dropout(x, p=self.dropout, training=self.training)
+            if self.residual and h.size(-1) == feat.size(-1):
+                h += feat[:h.size(0)]
+            feat = h.relu_()
+            # tic = time.time()
+            feat = self.push_and_pull(hist, feat, *args)
+            # toc = time.time()
+            # print("pull and push time for layer {}: {:4f}".format(num_layer, toc - tic))
+            feat = F.dropout(feat, p=self.dropout, training=self.training)
         
-        h = self.convs[-1](block, x)
+        h = self.convs[-1](block_2IB, feat)
 
         if not self.linear:
             return h
 
         if self.batch_norm:
             h = self.bns[-1](h)
-        if self.residual and h.size(-1) == x.size(-1):
-            h += x[:h.size(0)]
+        if self.residual and h.size(-1) == feat.size(-1):
+            h += feat[:h.size(0)]
         h = h.relu_()
         h = F.dropout(h, p=self.dropout, training=self.training)
         return self.lins[1](h)

@@ -69,3 +69,13 @@ class History(torch.nn.Module):
         return (f'{self.__class__.__name__}({self.num_embeddings}, '
                 f'{self.embedding_dim}, emb_device={self.emb.device}, '
                 f'device={self._device})')
+
+class FMHistory(History):
+    def __init__(self, num_embeddings: int, embedding_dim: int, device=None, gamma: float = 0.0):
+        super().__init__(num_embeddings, embedding_dim, device)
+        self.gamma = gamma
+
+    def FM_and_hist_update(self, x, hist_n_id):
+        hist_outbatch_emb = self.pull(hist_n_id)
+        h_bar_out_batch =  self.gamma * x + (1.0 - self.gamma) * hist_outbatch_emb
+        self.push(h_bar_out_batch, n_id=hist_n_id)

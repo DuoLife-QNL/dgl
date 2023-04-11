@@ -5,20 +5,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchmetrics.functional.classification import multiclass_f1_score
+
 import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
 from dgl.data import CiteseerGraphDataset, CoraGraphDataset, PubmedGraphDataset
 
 PROFILING = False
-DATASET = 'cora'
-SELF_LOOP = True
+DATASET = 'pubmed'
+SELF_LOOP = False
 NUM_LAYERS = 2
 HIDDEN_CHANNELS = 16
 DROPOUT = 0.5
-BATCH_SIZE = 12
 LR = 0.01
 WEIGHT_DECAY = 0.0
+EPOCHS = 400
 
 
 class GCN(nn.Module):
@@ -47,11 +49,11 @@ def evaluate(g, features, labels, mask, model):
     with torch.no_grad():
         logits = model(g, features)
         logits = logits[mask]
-        labels = labels[mask]
-        _, indices = torch.max(logits, dim=1)
-        correct = torch.sum(indices == labels)
-        return correct.item() * 1.0 / len(labels)
-
+        num_classes = logits.shape[1]
+        targets = labels[mask]
+        _, preds = torch.max(logits, dim=1)
+        f1_score = multiclass_f1_score(preds, targets, num_classes=num_classes, average='micro')
+        return f1_score.item()
 
 def train(g, features, labels, masks, model):
     # define train/val samples, loss function and optimizer
@@ -75,7 +77,7 @@ def train(g, features, labels, masks, model):
             # profile_memory=True
         )
         prof.start()
-    for epoch in range(30):
+    for epoch in range(EPOCHS):
         model.train()
         if PROFILING:
             with torch.profiler.record_function("Forward Computation"):

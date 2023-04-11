@@ -39,27 +39,32 @@ from torch.utils.tensorboard import SummaryWriter
 # Running Configurations
 METIS_PARTITION = True
 SHULFFLE_DATA = True
+HISTORY_REFRESH = True
 # Running time profiling
 PROFILING = False
 # Accuracy convergence logging in Tensorboard
 ACCLOG = False
 # Multi-GPU Settings
-GPU = '0,1,2,3'
+GPU = '0,1'
+PROF_PATH = '/home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/GCN/default'
+PART_PATH = '/home/lihz/Codes/dgl/MyCodes/GNNAutoScale/PartitionedGraph'
 
 # Hyperparameters
-DATASET = 'Reddit'
-SELF_LOOP = True
+DATASET = 'Pubmed'
+SELF_LOOP = False
 # GCN Norm is set to True ('both' in GraphConv) by default
 NUM_LAYERS = 2
-HIDDEN_CHANNELS = 256
+HIDDEN_CHANNELS = 16
 DROPOUT = 0.5
-NUM_PARTS = 200
-BATCH_SIZE = 50
+NUM_PARTS = 8
+BATCH_SIZE = 4
+INFERENCE_BATCH_SIZE = None
 LR = 0.01
-REG_WEIGHT_DECAY = 0.0
+REG_WEIGHT_DECAY = 5e-4
 NONREG_WEIGHT_DECAY = 0.0
-GRAD_NORM = None
-EPOCHS = 2400
+GRAD_NORM = 1.0
+EPOCHS = 200
+TEST_EVERY = 1
 
 """
 for small datasets, the following settings should be default:
@@ -69,7 +74,7 @@ RESIDUAL = False
 LINEAR = False
 POOL_SIZE = None
 """
-DROP_INPUT = False
+DROP_INPUT = True
 BATCH_NORM = False
 RESIDUAL = False
 LINEAR = False
@@ -146,7 +151,7 @@ def retrieve_dataset_info(data: DGLBuiltinDataset) -> Tuple[dgl.DGLGraph, int, i
     return g, in_size, out_size, train_mask, val_mask, labels
 
 
-def graph_partition(g, num_parts, partition_method = 'metis') -> List[torch.Tensor]:
+def graph_partition(g, num_parts, partition_method = 'metis') -> Tuple[dgl.DGLGraph, List[torch.Tensor]]:
     if partition_method == 'metis':
         # Metis Partition
         part_dict = dgl.metis_partition(
@@ -169,7 +174,7 @@ def graph_partition(g, num_parts, partition_method = 'metis') -> List[torch.Tens
     else:
         raise NotImplementedError
 
-    return batches
+    return g, batches
 
 class SubgraphConstructor(object):
     def __init__(self, g, num_layers, device):
@@ -214,11 +219,13 @@ def train(model: GCN, loader, optimizer, device):
 
     criterion = torch.nn.CrossEntropyLoss()
     for it, blocks in enumerate(loader):
+        optimizer.zero_grad()
         block = blocks[0].to(device)
         args = parse_args_from_block(block, training=True)
         out = model(block, *args)
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
+        
         if ACCLOG:
             writer.add_scalar('train_loss', loss, global_iter())
         loss.backward()
@@ -351,10 +358,11 @@ def run(rank, world_size, devices: List[int], dataset_info):
                 train(model, subgraph_loader, optimizer, device)
             with record_function("3: Test"):
                 train_acc, val_acc, tmp_test_acc = test(model, g, device)
+                # train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(model, g, out_size, device)
         else:
             train(model, subgraph_loader, optimizer, device)
-            # train_acc, val_acc, tmp_test_acc = test(model, g, device)
-            train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(model, g, out_size, device)
+            train_acc, val_acc, tmp_test_acc = test(model, g, device)
+            # train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(model, g, out_size, device)
 
         
         if rank == 0:
@@ -388,7 +396,7 @@ def main():
 
     data = load_dataset(DATASET)
     g, in_size, out_size, train_mask, val_mask, labels = retrieve_dataset_info(data)
-    batches = graph_partition(g, num_parts=NUM_PARTS, partition_method='metis')
+    g, batches = graph_partition(g, num_parts=NUM_PARTS, partition_method='metis')
     dataset_info = (g, batches, in_size, out_size, train_mask, val_mask, labels)
     g.create_formats_()
 

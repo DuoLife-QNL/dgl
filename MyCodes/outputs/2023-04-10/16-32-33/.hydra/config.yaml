@@ -1,0 +1,30 @@
+dataset:
+  name: Citeseer
+  metis_partition: true
+  shuffle_data: true
+  history_refresh: false
+  profiling: false
+  acclog: false
+  prof_path: /home/lihz/Codes/dgl/MyCodes/Profiling/GNNAutoScale/GCN/default
+  part_path: /home/lihz/Codes/dgl/MyCodes/GNNAutoScale/PartitionedGraph
+  self_loop: false
+  num_layers: 2
+  hidden_channels: 16
+  dropout: 0.5
+  num_parts: 24
+  batch_size: 8
+  inference_batch_size: null
+  lr: 0.002
+  reg_weight_decay: 0.0005
+  nonreg_weight_decay: 0.0
+  grad_norm: null
+  epochs: 200
+  test_every: 1
+  drop_input: true
+  batch_norm: false
+  residual: false
+  linear: false
+  pool_size: null
+  buffer_size: null
+run_env:
+  device: 0
