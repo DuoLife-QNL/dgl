@@ -13,6 +13,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 import torch
+import gc
 from torch.utils.data import DataLoader as TorchDataLoader
 
 from typing import List, Tuple, Optional
@@ -66,16 +67,17 @@ def init_acclog_prof(acc_log: bool = False, profiling: bool = False, prof_path: 
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_path),
-            record_shapes=True,
             with_stack=True,
-            with_modules=True
+            with_modules=True,
+            profile_memory=True, 
+            record_shapes=True
         )
         prof.schedule = torch.profiler.schedule(
-                skip_first=0,
-                wait=0, 
+                skip_first=1,
+                wait=1, 
                 warmup=1,
                 active=2, 
-                # repeat=2
+                repeat=2
         )
     return writer, global_iter, prof
         
@@ -220,6 +222,12 @@ def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: b
         if grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm)
         optimizer.step()
+        # for obj in gc.get_objects():
+        #     try:
+        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+        #             print(type(obj), obj.size())
+        #     except:
+        #         pass
 
 def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None):
     model.train()
@@ -292,18 +300,20 @@ def layerwise_minibatch_test(model: GCN, g: dgl.DGLGraph, out_size: int, device,
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(conf: DictConfig):
-    settings = conf.dataset
+    settings = conf._dataset
     run_env = conf.run_env
+    profiling_settings = run_env.prof
+    device_settings = run_env.device_settings
     TRAINING_METHOD: str = conf.training_method.name
     # Running Configurations
     METIS_PARTITION = settings.metis_partition
     SHUFFLE_DATA = settings.shuffle_data
     HISTORY_REFRESH = settings.history_refresh
     # Running time profiling
-    PROFILING = settings.profiling
+    PROFILING = profiling_settings.profiling
     # Accuracy convergence logging in Tensorboard
-    ACCLOG = settings.acclog
-    PROF_PATH = settings.prof_path
+    ACCLOG = profiling_settings.acclog
+    PROF_PATH = profiling_settings.prof_path
     PART_PATH = settings.part_path
 
     writer, global_iter, prof = init_acclog_prof(ACCLOG, PROFILING, PROF_PATH)
@@ -332,7 +342,7 @@ def main(conf: DictConfig):
     POOL_SIZE = settings.pool_size
     BUFFER_SIZE = settings.buffer_size
 
-    device = f'cuda:{run_env.device}' if torch.cuda.is_available() else 'cpu'
+    device = f'cuda:{device_settings.device}' if torch.cuda.is_available() else 'cpu'
 
     data = load_dataset(DATASET, self_loop=SELF_LOOP)
     g, in_size, out_size, train_mask, val_mask, labels = retrieve_dataset_info(data)
@@ -437,6 +447,8 @@ def main(conf: DictConfig):
             log.info("Test time (s): {:4f}".format(test_timer.duration()))
             log.info(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
+        # prevent from dgl cuda OOM
+        torch.cuda.empty_cache()
         if PROFILING:
             prof.step()
 
