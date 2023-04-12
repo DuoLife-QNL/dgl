@@ -66,18 +66,18 @@ def init_acclog_prof(acc_log: bool = False, profiling: bool = False, prof_path: 
                 torch.profiler.ProfilerActivity.CPU,
                 torch.profiler.ProfilerActivity.CUDA,
             ],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_path),
-            with_stack=True,
-            with_modules=True,
-            profile_memory=True, 
-            record_shapes=True
-        )
-        prof.schedule = torch.profiler.schedule(
+            schedule=torch.profiler.schedule(
                 skip_first=1,
                 wait=1, 
                 warmup=1,
                 active=2, 
                 repeat=2
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_path),
+            with_stack=True,
+            with_modules=True,
+            profile_memory=True, 
+            record_shapes=True
         )
     return writer, global_iter, prof
         
@@ -300,47 +300,50 @@ def layerwise_minibatch_test(model: GCN, g: dgl.DGLGraph, out_size: int, device,
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(conf: DictConfig):
-    settings = conf._dataset
+    """
+    Parsing Arguments
+    """
+    dataset_settings = conf._dataset
     run_env = conf.run_env
     profiling_settings = run_env.prof
     device_settings = run_env.device_settings
     TRAINING_METHOD: str = conf.training_method.name
     # Running Configurations
-    METIS_PARTITION = settings.metis_partition
-    SHUFFLE_DATA = settings.shuffle_data
-    HISTORY_REFRESH = settings.history_refresh
+    METIS_PARTITION = dataset_settings.metis_partition
+    SHUFFLE_DATA = dataset_settings.shuffle_data
+    HISTORY_REFRESH = dataset_settings.history_refresh
     # Running time profiling
     PROFILING = profiling_settings.profiling
     # Accuracy convergence logging in Tensorboard
     ACCLOG = profiling_settings.acclog
     PROF_PATH = profiling_settings.prof_path
-    PART_PATH = settings.part_path
+    PART_PATH = dataset_settings.part_path
 
     writer, global_iter, prof = init_acclog_prof(ACCLOG, PROFILING, PROF_PATH)
 
     # Hyperparameters
-    DATASET = settings.name
-    SELF_LOOP = settings.self_loop
+    DATASET = dataset_settings.name
+    SELF_LOOP = dataset_settings.self_loop
     # GCN Norm is set to True ('both' in GraphConv) by default
-    NUM_LAYERS = settings.num_layers
-    HIDDEN_CHANNELS = settings.hidden_channels
-    DROPOUT = settings.dropout
-    NUM_PARTS = settings.num_parts
-    BATCH_SIZE = settings.batch_size
-    INFERENCE_BATCH_SIZE = settings.inference_batch_size
-    LR = settings.lr
-    REG_WEIGHT_DECAY = settings.reg_weight_decay
-    NONREG_WEIGHT_DECAY = settings.nonreg_weight_decay
-    GRAD_NORM = settings.grad_norm
-    EPOCHS = settings.epochs
-    TEST_EVERY = settings.test_every
+    NUM_LAYERS = dataset_settings.num_layers
+    HIDDEN_CHANNELS = dataset_settings.hidden_channels
+    DROPOUT = dataset_settings.dropout
+    NUM_PARTS = dataset_settings.num_parts
+    BATCH_SIZE = dataset_settings.batch_size
+    INFERENCE_BATCH_SIZE = dataset_settings.inference_batch_size
+    LR = dataset_settings.lr
+    REG_WEIGHT_DECAY = dataset_settings.reg_weight_decay
+    NONREG_WEIGHT_DECAY = dataset_settings.nonreg_weight_decay
+    GRAD_NORM = dataset_settings.grad_norm
+    EPOCHS = dataset_settings.epochs
+    TEST_EVERY = dataset_settings.test_every
 
-    DROP_INPUT = settings.drop_input
-    BATCH_NORM = settings.batch_norm
-    RESIDUAL = settings.residual
-    LINEAR = settings.linear
-    POOL_SIZE = settings.pool_size
-    BUFFER_SIZE = settings.buffer_size
+    DROP_INPUT = dataset_settings.drop_input
+    BATCH_NORM = dataset_settings.batch_norm
+    RESIDUAL = dataset_settings.residual
+    LINEAR = dataset_settings.linear
+    POOL_SIZE = dataset_settings.pool_size
+    BUFFER_SIZE = dataset_settings.buffer_size
 
     device = f'cuda:{device_settings.device}' if torch.cuda.is_available() else 'cpu'
 
