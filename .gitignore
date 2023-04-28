@@ -173,5 +173,9 @@ config.cmake
 # profiling
 MyCodes/Profiling/
 
+# running logs
+MyCodes/multirun
+MyCodes/outputs
+
 # Obj temp storage
 *.pickle

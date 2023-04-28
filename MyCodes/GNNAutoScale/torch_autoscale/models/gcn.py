@@ -9,6 +9,7 @@ from torch.nn import ModuleList, Linear, BatchNorm1d
 import dgl
 import dgl.nn as dglnn
 from torch_autoscale.models import ScalableGNN, GASGNN
+from torch_autoscale.Metric import Metric
 from dgl.heterograph import DGLBlock
 
 
@@ -18,9 +19,10 @@ class GCN(GASGNN):
                  drop_input: bool = True, batch_norm: bool = False,
                  residual: bool = False, linear: bool = False,
                  pool_size: Optional[int] = None,
-                 buffer_size: Optional[int] = None, device=None):
+                 buffer_size: Optional[int] = None, device=None,
+                 metric: Optional[Metric] = None):
         super().__init__(num_nodes, hidden_channels, num_layers, pool_size,
-                         buffer_size, device)
+                         buffer_size, device, metric)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -73,6 +75,7 @@ class GCN(GASGNN):
 
 
     def forward(self, block_2IB: DGLBlock, feat: Tensor, *args) -> Tensor:
+        m = self.metric
         if self.drop_input:
             feat = F.dropout(feat, p=self.dropout, training=self.training)
 
@@ -81,19 +84,23 @@ class GCN(GASGNN):
             feat = F.dropout(feat, p=self.dropout, training=self.training)
 
         for num_layer, conv, bn, hist in zip(range(self.num_layers), self.convs[:-1], self.bns, self.histories):
+            m.start('Forward_1: conv_all2IB')
             h = conv(block_2IB, feat)
+            m.stop('Forward_1: conv_all2IB')
+            
             if self.batch_norm:
                 h = bn(h)
             if self.residual and h.size(-1) == feat.size(-1):
                 h += feat[:h.size(0)]
             feat = h.relu_()
-            # tic = time.time()
+            m.start('Forward_2: push_and_pull')
             feat = self.push_and_pull(hist, feat, *args)
-            # toc = time.time()
-            # print("pull and push time for layer {}: {:4f}".format(num_layer, toc - tic))
+            m.stop('Forward_2: push_and_pull')
             feat = F.dropout(feat, p=self.dropout, training=self.training)
         
+        m.start('Forward_3: conv_final_layer')
         h = self.convs[-1](block_2IB, feat)
+        m.stop('Forward_3: conv_final_layer')
 
         if not self.linear:
             return h

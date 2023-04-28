@@ -22,6 +22,7 @@ from .pool import AsyncIOPool  # noqa
 from .utils import compute_micro_f1, gen_masks  # noqa
 # from .loader import SubgraphLoader, EvalSubgraphLoader  # noqa
 from .models import ScalableGNN
+from .Metric import Metric
 
 __all__ = [
     'get_data',
@@ -36,5 +37,6 @@ __all__ = [
     'SubgraphLoader',
     'EvalSubgraphLoader',
     'ScalableGNN',
+    'Metric',
     '__version__',
 ]

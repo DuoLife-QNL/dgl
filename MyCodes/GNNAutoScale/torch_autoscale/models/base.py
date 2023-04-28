@@ -8,6 +8,8 @@ from torch import Tensor
 
 from torch_autoscale import History, AsyncIOPool, FMHistory
 from torch.utils.data import DataLoader as TorchDataLoader
+import torch.profiler
+from torch_autoscale.Metric import Metric
 
 import dgl
 from dgl.heterograph import DGLBlock
@@ -44,7 +46,8 @@ class ScalableGNN(torch.nn.Module):
     """
     def __init__(self, num_nodes: int, hidden_channels: int, num_layers: int,
                  pool_size: Optional[int] = None,
-                 buffer_size: Optional[int] = None, device=None):
+                 buffer_size: Optional[int] = None, device=None,
+                 metric: Optional[Metric] = None):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -61,6 +64,7 @@ class ScalableGNN(torch.nn.Module):
         self.pool: Optional[AsyncIOPool] = None
         self._async = False
         self.__out: Optional[Tensor] = None
+        self.metric: Optional[Metric] = metric
 
     @property
     def emb_device(self):
@@ -186,9 +190,10 @@ class ScalableGNN(torch.nn.Module):
 class GASGNN(ScalableGNN):
     def __init__(self, num_nodes: int, hidden_channels: int, num_layers: int,
                 pool_size: Optional[int] = None,
-                buffer_size: Optional[int] = None, device=None):
+                buffer_size: Optional[int] = None, device=None,
+                metric: Optional[Metric] = None):
         super().__init__(num_nodes, hidden_channels, num_layers, pool_size,
-                        buffer_size, device)
+                        buffer_size, device, metric)
     def __call__(
         self,
         block_2IB: DGLBlock,
@@ -264,8 +269,11 @@ class GASGNN(ScalableGNN):
         return out
             
 class FMGNN(ScalableGNN):
-    def __init__(self, num_nodes: int, hidden_channels: int, num_layers: int, pool_size: Optional[int] = None, buffer_size: Optional[int] = None, device=None, gamma: float = 0.0):
-        super().__init__(num_nodes, hidden_channels, num_layers, pool_size, buffer_size, device)
+    def __init__(
+            self, num_nodes: int, hidden_channels: int, num_layers: int, pool_size: Optional[int] = None, 
+            buffer_size: Optional[int] = None, device=None, gamma: float = 0.0,
+            metric: Optional[Metric] = None):
+        super().__init__(num_nodes, hidden_channels, num_layers, pool_size, buffer_size, device, metric)
         self.histories = torch.nn.ModuleList([
             FMHistory(num_nodes, hidden_channels, device, gamma)
             for _ in range(num_layers - 1)

@@ -136,17 +136,17 @@ if ACCLOG:
     global_iter = GlobalIterater()
 
 if PROFILING:
-    prof = torch.profiler.profile(
+    metric = torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
         ],
         on_trace_ready=torch.profiler.tensorboard_trace_handler(PROF_PATH),
-        record_shapes=True,
-        with_stack=True,
-        with_modules=True
+        # record_shapes=True,
+        # with_stack=True,
+        # with_modules=True
     )
-    prof.schedule = torch.profiler.schedule(
+    metric.schedule = torch.profiler.schedule(
             skip_first=0,
             wait=0, 
             warmup=1,
@@ -482,7 +482,7 @@ def main():
         ).to(device)
 
     if PROFILING:
-        prof.start()
+        metric.start()
 
     tic = time.time()
     # test(model, g, device) # Fill the history.
@@ -524,11 +524,11 @@ def main():
             print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
         if PROFILING:
-            prof.step()
+            metric.step()
 
     if PROFILING:
-        prof.stop()
-        print(prof.key_averages().table(sort_by="cpu_time_total"))
+        metric.stop()
+        print(metric.key_averages().table(sort_by="cpu_time_total"))
 
 
 if __name__ == '__main__':

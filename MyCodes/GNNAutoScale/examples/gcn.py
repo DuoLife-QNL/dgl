@@ -5,8 +5,10 @@ import sys
 import os
 import pickle
 import logging
+from torch_autoscale.Metric import Metric
 
 from MyTimer import Timer
+from load_reddit_dataset import load_reddit
 from torch_autoscale.models import GCN, FMGCN
 from torch_autoscale import compute_micro_f1
 import hydra
@@ -45,7 +47,6 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 torch.manual_seed(12345)
-log = logging.getLogger(__name__)
 
 
 class GlobalIterater(object):
@@ -71,19 +72,29 @@ def init_acclog_prof(acc_log: bool = False, profiling: bool = False, prof_path: 
                 torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
-                skip_first=1,
-                wait=1, 
-                warmup=1,
+                skip_first=0,
+                wait=0, 
+                warmup=0,
                 active=2, 
-                repeat=2
+                repeat=1
             ),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(prof_path),
-            with_stack=True,
+            # with_stack=True,
             with_modules=True,
             profile_memory=True, 
             record_shapes=True
         )
     return writer, global_iter, prof
+
+class VirtualDatasetClass(List):
+    def __init__(self, data, n_classes):
+        self.data = data
+        self.length = len(data)
+        self.num_classes = n_classes
+    def __getitem__(self, idx):
+        return self.data[idx]
+    def __len__(self):
+        return self.length
         
 
 def load_dataset(dataset_name: str, self_loop: bool = False) -> DGLBuiltinDataset:
@@ -103,6 +114,10 @@ def load_dataset(dataset_name: str, self_loop: bool = False) -> DGLBuiltinDatase
         data = WikiCSDataset(transform=transform)
     elif dataset_name == 'Reddit':
         data = RedditDataset(transform=transform)
+    elif dataset_name == 'Reddit2':
+        graph, n_classes = load_reddit()
+        graph = dgl.add_self_loop(graph)
+        data = VirtualDatasetClass([graph], n_classes)
     elif dataset_name == 'Flickr':
         data = FlickrDataset(transform=transform)
 
@@ -154,30 +169,107 @@ def graph_partition(g, num_parts, partition_method = 'metis', part_path: Optiona
     return g, batches
 
 class SubgraphConstructor(object):
-    def __init__(self, g, num_layers):
+    def __init__(self, g, num_layers, device, IB2OB_construction: str = 'naive', metric: Optional[Metric] = None):
         self.g = g
         self.num_layers = num_layers
         self.full_neighbor_sampler = MultiLayerFullNeighborSampler(1)
+        if metric is None:
+            self.metric = Metric()
+        self.metric = metric
+        self.device = device
+        self.IB2OB_construction = IB2OB_construction
     
     def construct_subgraph_gas(self, batches: Tuple[torch.Tensor]):
         IB_nodes = torch.cat(batches, dim=0)
+        self.metric.start('construct subgraph: all2IB')
+        # with Metric(timer_name = "construct subgraph: all2IB"):
         subgraph = dgl.in_subgraph(self.g, IB_nodes)
+        self.metric.stop('construct subgraph: all2IB')
+
+        self.metric.start('H2D: subgraph all2IB')
+        subgraph = subgraph.to(self.device)
+        self.metric.stop('H2D: subgraph all2IB')
+        self.metric.start('to_block: subgraph all2IB')
         block = dgl.to_block(subgraph, dst_nodes=IB_nodes)
+        self.metric.stop('to_block: subgraph all2IB')
         block.num_nodes_in_each_batch = torch.tensor([batch.size(dim=0) for batch in batches])
         return [block for _ in range(self.num_layers)]
 
     def construct_subgraphs_fm(self, batches: Tuple[torch.Tensor]):
         IB_nodes = torch.cat(batches, dim=0)
         num_IB_nodes = IB_nodes.size(0)
-        _, _, blocks = self.full_neighbor_sampler.sample(self.g, IB_nodes)
-        block_all2IB = blocks[0]
-        OB_nodes = block_all2IB.srcdata[dgl.NID][num_IB_nodes:]
+        
+        """
+        construct block all2IB
+        """
+        self.metric.start('construct subgraph: all2IB')
+        subgraph_all2IB = dgl.in_subgraph(self.g, IB_nodes)
+        self.metric.stop('construct subgraph: all2IB')
+
+        self.metric.start('H2D: subgraph_all2IB')  
+        subgraph_all2IB = subgraph_all2IB.to(self.device)
+        self.metric.stop('H2D: subgraph_all2IB')
+        
+        self.metric.start('to_block: subgraph all2IB')
+        block_all2IB = dgl.to_block(subgraph_all2IB, dst_nodes=IB_nodes)
+        self.metric.stop('to_block: subgraph all2IB')
+
+        """
+        Construct block IB2OB
+        """
         block_all2IB.num_nodes_in_each_batch = torch.tensor([batch.size(dim=0) for batch in batches])
-        # extract a block such that the OB-nodes are the dst nodes and the IB-nodes are the source nodes from graph self.g
-        subgraph_IB2all = dgl.out_subgraph(self.g, IB_nodes)
-        subgraph_IB2OB = dgl.in_subgraph(subgraph_IB2all, OB_nodes)
+        OB_nodes = block_all2IB.srcdata[dgl.NID][num_IB_nodes:]
+
+        self.metric.start('construct subgraph: IB2OB')
+        if self.IB2OB_construction == 'naive':
+            # extract a block such that the OB-nodes are the dst nodes and the IB-nodes are the source nodes from graph self.g
+            subgraph_IB2all = dgl.out_subgraph(self.g, IB_nodes)
+            self.metric.start('H2D: subgraph_IB2all')
+            subgraph_IB2all = subgraph_IB2all.to(self.device)
+            self.metric.stop('H2D: subgraph_IB2all')
+            subgraph_IB2OB = dgl.in_subgraph(subgraph_IB2all, OB_nodes)
+        elif self.IB2OB_construction == 'opt':
+            subgraph_OB2IB = dgl.out_subgraph(subgraph_all2IB, OB_nodes)
+            subgraph_IB2OB = dgl.reverse(subgraph_OB2IB)
+        else:
+            raise NotImplementedError
+        self.metric.stop('construct subgraph: IB2OB')
+        
+
+        self.metric.start('to_block: subgraph IB2OB')
         block_IB2OB = dgl.to_block(subgraph_IB2OB, dst_nodes=OB_nodes, include_dst_in_src=False)
+        self.metric.stop('to_block: subgraph IB2OB')
         return block_all2IB, block_IB2OB
+    
+    # def construct_subgraphs_fm_opt(self, batches: Tuple[torch.Tensor]):
+    #     IB_nodes = torch.cat(batches, dim=0)
+    #     num_IB_nodes = IB_nodes.size(0)
+
+    #     self.metric.start('construct subgraph: all2IB')  
+    #     subgraph_all2IB = dgl.in_subgraph(self.g, IB_nodes)
+    #     self.metric.stop('construct subgraph: all2IB')
+        
+    #     self.metric.start('H2D: subgraph_all2IB')  
+    #     subgraph_all2IB = subgraph_all2IB.to(self.device)
+    #     self.metric.stop('H2D: subgraph_all2IB')
+
+    #     self.metric.start('to_block: all2IB')
+    #     block_all2IB = dgl.to_block(subgraph_all2IB, dst_nodes=IB_nodes)
+    #     self.metric.stop('to_block: all2IB')
+
+    #     block_all2IB.num_nodes_in_each_batch = torch.tensor([batch.size(dim=0) for batch in batches])
+    #     OB_nodes = block_all2IB.srcdata[dgl.NID][num_IB_nodes:]
+
+    #     self.metric.start('construct subgraph: IB2OB')
+    #     subgraph_OB2IB = dgl.out_subgraph(subgraph_all2IB, OB_nodes)
+    #     subgraph_IB2OB = dgl.reverse(subgraph_OB2IB)
+    #     self.metric.stop('construct subgraph: IB2OB')
+
+    #     self.metric.start('to_block: subgraph IB2OB')
+    #     block_IB2OB = dgl.to_block(subgraph_IB2OB, dst_nodes=OB_nodes, include_dst_in_src=False)
+    #     self.metric.stop('to_block: subgraph IB2OB')
+
+    #     return block_all2IB, block_IB2OB
         
 def parse_args_from_block(block, training=True):
     if training is False:
@@ -204,7 +296,9 @@ def parse_args_from_block(block, training=True):
 
         return feat, num_output_nodes, n_ids, offset, count
 
-def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None):
+def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
+    if metric is None:
+        metric = Metric()
     model.train()
 
     criterion = torch.nn.CrossEntropyLoss()
@@ -212,17 +306,25 @@ def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: b
     for it, blocks in enumerate(loader):
         block = blocks[0]
         optimizer.zero_grad()
+        metric.start('H2D: block_all2IB')
         block = block.to(device)
+        metric.stop('H2D: block_all2IB')
+        metric.start('parse_arg')
         args = parse_args_from_block(block, training=True)
+        metric.stop('parse_arg')
+        metric.start('forward')
         out = model(block, *args)
+        metric.stop('forward')
         train_mask = block.dstdata['train_mask']
         loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
         # print("Iteration {} | Loss {:.4f}".format(it, loss.item()))
-        log.info("Iteration {} | Loss {:.4f}".format(it, loss.item()))
+        # log.info("Iteration {} | Loss {:.4f}".format(it, loss.item()))
 
         if acc_log:
             writer.add_scalar('train_loss', loss, global_iter())
+        metric.start('backward')
         loss.backward()
+        metric.stop('backward')
         if grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm)
         optimizer.step()
@@ -233,7 +335,9 @@ def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: b
         #     except:
         #         pass
 
-def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None):
+def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
+    if metric is None:
+        metric = Metric()
     model.train()
 
     criterion = torch.nn.CrossEntropyLoss()
@@ -244,17 +348,27 @@ def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: 
         # num_output_nodes = block.num_dst_nodes()
         # num_edges = block.num_edges()
         # print("block_num_input_nodes: {}, block_num_output_nodes: {}, block_num_edges: {}".format(num_input_nodes, num_output_nodes, num_edges))
+        metric.start('H2D: block_all2IB & block_IB2OB')
         block_all2IB = block_all2IB.to(device)
         block_IB2OB = block_IB2OB.to(device)
+        metric.stop('H2D: block_all2IB & block_IB2OB')
+
+        metric.start('parse_arg')
         feat, num_output_nodes, n_ids, offset, count = parse_args_from_block(block_all2IB, training=True)
+        metric.stop('parse_arg')
+
+        metric.start('forward')
         out = model(block_all2IB, feat, block_IB2OB, num_output_nodes, n_ids, offset, count)
+        metric.stop('forward')
         train_mask = block_all2IB.dstdata['train_mask']
         loss = criterion(out[train_mask], block_all2IB.dstdata['label'][train_mask])
-        log.info("Iteration {} | Loss {:.4f}".format(it, loss.item()))
+        # log.info("Iteration {} | Loss {:.4f}".format(it, loss.item()))
 
         if acc_log:
             writer.add_scalar('train_loss', loss, global_iter())
+        metric.start('backward')
         loss.backward()
+        metric.stop('backward')
         if grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm)
         optimizer.step()
@@ -318,6 +432,8 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
     PART_PATH = dataset_settings.part_path
 
     writer, global_iter, prof = prof_utils
+    log = logging.getLogger(__name__)
+    metric = Metric(logger=log)
 
     # Hyperparameters
     # GCN Norm is set to True ('both' in GraphConv) by default
@@ -364,80 +480,74 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
         num_partitions_per_it = BATCH_SIZE
         num_partitions = NUM_PARTS
         INFERENCE_BATCH_SIZE = num_partitions_per_it * (num_total_nodes // num_partitions)
-
-    constructor = SubgraphConstructor(g, NUM_LAYERS)
+    
+    if TRAINING_METHOD == 'graphfm':
+        IB2OB_CONSTRUCT = conf.training_method.ib2ob_construct
+        constructor = SubgraphConstructor(g, NUM_LAYERS, device, IB2OB_construction= IB2OB_CONSTRUCT, metric=metric)
+    else:
+        constructor = SubgraphConstructor(g, NUM_LAYERS, device, metric=metric)
+    
+    loader_args = {
+        'dataset': batches,
+        'batch_size': BATCH_SIZE
+    }
     if world_size > 1:
         dist_sampler = DistributedSampler(dataset=batches, shuffle=True)
-        if TRAINING_METHOD == 'gas':
-            subgraph_loader = TorchDataLoader(
-                dataset = batches,
-                batch_size=BATCH_SIZE,
-                collate_fn = constructor.construct_subgraph_gas,
-                shuffle=SHUFFLE_DATA,
-                sampler=dist_sampler
-            )
-        elif TRAINING_METHOD == 'graphfm':
-            subgraph_loader = TorchDataLoader(
-                dataset = batches,
-                batch_size=BATCH_SIZE,
-                collate_fn = constructor.construct_subgraphs_fm,
-                shuffle=SHUFFLE_DATA,
-                sampler=dist_sampler
-            )
+        loader_args['sampler'] = dist_sampler
     else:
-        if TRAINING_METHOD == 'gas':
-            subgraph_loader = TorchDataLoader(
-                dataset = batches,
-                batch_size=BATCH_SIZE,
-                collate_fn = constructor.construct_subgraph_gas,
-                shuffle=SHUFFLE_DATA
-            )
-        elif TRAINING_METHOD == 'graphfm':
-            subgraph_loader = TorchDataLoader(
-                dataset = batches,
-                batch_size=BATCH_SIZE,
-                collate_fn = constructor.construct_subgraphs_fm,
-                shuffle=SHUFFLE_DATA
-            )
+        loader_args['shuffle'] = SHUFFLE_DATA
+    if TRAINING_METHOD == 'gas':
+        loader_args['collate_fn'] = constructor.construct_subgraph_gas
+    elif TRAINING_METHOD == 'graphfm':
+        loader_args['collate_fn'] = constructor.construct_subgraphs_fm
+    
+    subgraph_loader = TorchDataLoader(**loader_args)
+
+    # if TRAINING_METHOD == 'gas':
+    #     subgraph_loader = TorchDataLoader(
+    #         dataset = batches,
+    #         batch_size=BATCH_SIZE,
+    #         collate_fn = constructor.construct_subgraph_gas,
+    #         shuffle=SHUFFLE_DATA,
+    #         sampler=dist_sampler
+    #     )
+    # elif TRAINING_METHOD == 'graphfm':
+    #     subgraph_loader = TorchDataLoader(
+    #         dataset = batches,
+    #         batch_size=BATCH_SIZE,
+    #         collate_fn = constructor.construct_subgraphs_fm,
+    #         shuffle=SHUFFLE_DATA,
+    #         sampler=dist_sampler
+    #     )
 
     best_val_acc = test_acc = 0
+    
+    model_args = {
+        'num_nodes': g.num_nodes(),
+        'in_channels': in_size,
+        'hidden_channels': HIDDEN_CHANNELS,
+        'out_channels': out_size,
+        'num_layers': NUM_LAYERS,
+        'drop_input': DROP_INPUT,
+        'dropout': DROPOUT,
+        'batch_norm': BATCH_NORM,
+        'residual': RESIDUAL,
+        'linear': LINEAR,
+        'pool_size': POOL_SIZE,  # Number of pinned CPU buffers
+        'buffer_size': BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
+        'metric': metric
+    }
 
     if TRAINING_METHOD == 'gas':
-        model = GCN(
-            num_nodes=g.num_nodes(),
-            in_channels=in_size,
-            hidden_channels=HIDDEN_CHANNELS,
-            out_channels=out_size,
-            num_layers=NUM_LAYERS,
-            drop_input=DROP_INPUT,
-            dropout=DROPOUT,
-            batch_norm=BATCH_NORM,
-            residual=RESIDUAL,
-            linear=LINEAR,
-            pool_size=POOL_SIZE,  # Number of pinned CPU buffers
-            buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
-        ).to(device)
+        model = GCN(**model_args).to(device)
     elif TRAINING_METHOD == 'graphfm':
-        model = FMGCN(
-            num_nodes=g.num_nodes(),
-            in_channels=in_size,
-            hidden_channels=HIDDEN_CHANNELS,
-            out_channels=out_size,
-            num_layers=NUM_LAYERS,
-            drop_input=DROP_INPUT,
-            dropout=DROPOUT,
-            batch_norm=BATCH_NORM,
-            residual=RESIDUAL,
-            linear=LINEAR,
-            pool_size=POOL_SIZE,  # Number of pinned CPU buffers
-            buffer_size=BUFFER_SIZE,  # Size of pinned CPU buffers (max #out-of-batch nodes)
-        ).to(device)
+        model = FMGCN(**model_args).to(device)
 
     if PROFILING:
         prof.start()
 
     tic = time.time()
-    # test(model, g, device) # Fill the history.
+    # Fill the history.
     layerwise_minibatch_test(model, g, out_size, device, INFERENCE_BATCH_SIZE, history_refresh=True)
     toc = time.time()
     log.info("Fill History Time(s): {:.4f}".format(toc - tic))
@@ -448,30 +558,38 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
             output_device=dev_id, 
             find_unused_parameters=True
         )
-    optimizer = torch.optim.Adam([
-        dict(params=model.reg_modules.parameters(), weight_decay=REG_WEIGHT_DECAY),
-        dict(params=model.nonreg_modules.parameters(), weight_decay=NONREG_WEIGHT_DECAY)
-    ], lr=LR)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    else:
+        optimizer = torch.optim.Adam([
+            dict(params=model.reg_modules.parameters(), weight_decay=REG_WEIGHT_DECAY),
+            dict(params=model.nonreg_modules.parameters(), weight_decay=NONREG_WEIGHT_DECAY)
+        ], lr=LR)
 
     """
     Training Loop
     """
+    # torch.cuda.empty_cache()
     for epoch in range(0, EPOCHS):
         train_timer = Timer()
         train_timer.start()
+        metric.start('epoch')
         with record_function("2: Train"):
             log.info("Training epoch {}".format(epoch))
             if TRAINING_METHOD == 'gas':
-                gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM)
+                gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
             elif TRAINING_METHOD == 'graphfm':
-                fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM)
+                fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+        metric.stop('epoch')
         train_timer.end()
         log.info("Train time (s): {:4f}".format(train_timer.duration()))
         if epoch % TEST_EVERY == 0 and rank == 0:
             test_timer = Timer()
             test_timer.start()
             with record_function("3: Test"):
-                train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(model, g, out_size, device, INFERENCE_BATCH_SIZE, history_refresh=HISTORY_REFRESH)
+                train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(
+                    model if world_size == 1 else model.module,
+                    g, out_size, device, INFERENCE_BATCH_SIZE, history_refresh=HISTORY_REFRESH
+                    )
                 # train_acc, val_acc, tmp_test_acc = test(model, g, device)
             test_timer.end()
             if val_acc > best_val_acc:
@@ -486,12 +604,13 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
             log.info(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
         # prevent from dgl cuda OOM
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         if PROFILING:
             prof.step()
         if world_size > 1:
             dist.barrier()
 
+    metric.print_metrics()
     if PROFILING:
         prof.stop()
         print(prof.key_averages().table(sort_by="cpu_time_total"))

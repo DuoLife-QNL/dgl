@@ -1,0 +1,3 @@
+profiling: false
+acclog: false
+prof_path: '/home/lihz/Codes/dgl/MyCodes/Profiling/${training_method.name}/GCN/${_dataset.name}/default'

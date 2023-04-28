@@ -99,7 +99,7 @@ if ACCLOG:
     global_iter = GlobalIterater()
 
 if PROFILING:
-    prof = torch.profiler.profile(
+    metric = torch.profiler.profile(
         activities=[
             torch.profiler.ProfilerActivity.CPU,
             torch.profiler.ProfilerActivity.CUDA,
@@ -109,7 +109,7 @@ if PROFILING:
         with_stack=True,
         with_modules=True
     )
-    prof.schedule = torch.profiler.schedule(
+    metric.schedule = torch.profiler.schedule(
             skip_first=2,
             wait=2, 
             warmup=2,
@@ -327,7 +327,7 @@ def run(rank, world_size, devices: List[int], dataset_info):
 
 
     if PROFILING:
-        prof.start()
+        metric.start()
 
     # device_cpu = 'cpu'
     # if dist.get_rank() == 0:
@@ -377,13 +377,13 @@ def run(rank, world_size, devices: List[int], dataset_info):
             print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
             if PROFILING:
-                prof.step()
+                metric.step()
         
         dist.barrier()
 
     if PROFILING:
-        prof.stop()
-        print(prof.key_averages().table(sort_by="cpu_time_total"))
+        metric.stop()
+        print(metric.key_averages().table(sort_by="cpu_time_total"))
     
 
 def main():

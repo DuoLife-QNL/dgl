@@ -1,0 +1,27 @@
+name: Reddit
+
+metis_partition: true
+shuffle_data: true
+history_refresh: false
+part_path: '/home/lihz/Codes/dgl/MyCodes/GNNAutoScale/PartitionedGraph'
+
+self_loop: true
+num_layers: 2
+hidden_channels: 256
+dropout: 0.5
+num_parts: 200
+batch_size: 50
+inference_batch_size: null
+lr: 0.01
+reg_weight_decay: 0.0
+nonreg_weight_decay: 0.0
+grad_norm: null
+epochs: 200
+test_every: 1
+
+drop_input: false
+batch_norm: false
+residual: false
+linear: false
+pool_size: 2
+buffer_size: null

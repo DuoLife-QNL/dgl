@@ -10,7 +10,10 @@ import dgl
 import dgl.nn as dglnn
 from torch_autoscale.models import ScalableGNN, FMGNN
 from torch_autoscale import FMHistory
+from torch_autoscale.Metric import Metric
 from dgl.heterograph import DGLBlock
+
+from torch.profiler import record_function
 
 
 class FMGCN(FMGNN):
@@ -19,9 +22,10 @@ class FMGCN(FMGNN):
                  drop_input: bool = True, batch_norm: bool = False,
                  residual: bool = False, linear: bool = False,
                  pool_size: Optional[int] = None,
-                 buffer_size: Optional[int] = None, device=None):
+                 buffer_size: Optional[int] = None, device=None,
+                 metric: Optional[Metric] = None):
         super().__init__(num_nodes, hidden_channels, num_layers, pool_size,
-                         buffer_size, device)
+                         buffer_size, device, metric=metric)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -79,16 +83,24 @@ class FMGCN(FMGNN):
         # the IDs of the IB nodes which should be aggregated to the OB nodes
         IBs_used_for_OB = block_IB2OB.srcdata[dgl.NID]
         # the IDs of all IB nodes
-        IBs_all = block_2IB.dstdata[dgl.NID]
-        selected_indices = []
+        # convert IBs_all to a list
+        IBs_all = block_2IB.dstdata[dgl.NID].tolist()
+        # selected_indices = []
 
-        # initiate a bucket with the size of number of nodes, each element is None
-        bucket = [None] * self.num_nodes
+        # self.prof.start()
+        # initiate a tensor with the size of number of nodes, each element is -1
+        # with record_function('init_bucket'):
+            # bucket = torch.tensor([-1] * self.num_nodes, dtype=int, device='cpu')
+        bucket = [-1] * self.num_nodes
 
+        # with record_function('fill_bucket'):
         for i, nid in enumerate(IBs_all):
-            bucket[nid.item()] = i
-        for nid in IBs_used_for_OB:
-            selected_indices.append(bucket[nid.item()])
+            bucket[nid] = i
+        bucket = torch.tensor(bucket, dtype=int, device=self.device)
+        # with record_function('get_index'):
+        selected_indices = torch.index_select(bucket, 0, IBs_used_for_OB)
+        # for nid in IBs_used_for_OB:
+        #     selected_indices.append(bucket[nid.item()])
         
         # i = j = 0
         # while j < IBs_used_for_OB.size(0):
@@ -101,11 +113,14 @@ class FMGCN(FMGNN):
         #         i += 1
         # selected_indices = torch.tensor(selected_indices, dtype=int, device=feat_all.device)
         # select the feat of nodes in IB used for aggregation to OB
-        feat_IB_used_for_OB = feat_allIB[selected_indices]
+        # with record_function('select feature according to the indices'):
+        feat_IB_used_for_OB = feat_allIB.index_select(0, selected_indices)
+        # feat_IB_used_for_OB = feat_allIB[selected_indices]
 
         return feat_IB_used_for_OB
 
     def forward(self, block_2IB: DGLBlock, feat: Tensor, block_IB2OB: DGLBlock, *args) -> Tensor:
+        m = self.metric 
         """
         args:
             block_2IB: IB + OB nodes as the src nodes, IB as the dst nodes
@@ -123,9 +138,13 @@ class FMGCN(FMGNN):
             """
             Prepare the feature of those IB nodes who are used for the aggregation to OB nodes.
             """
+            m.start('Forward_1: extract_feat_IB2OB')
             feat_IB2OB =  self.extract_feat_IB2OB(feat, block_2IB, block_IB2OB).detach()
+            m.stop('Forward_1: extract_feat_IB2OB')
 
+            m.start('Forward_2: conv_all2IB')
             h = conv(block_2IB, feat)
+            m.stop('Forward_2: conv_all2IB')
             if self.batch_norm:
                 h = bn(h)
             if self.residual and h.size(-1) == feat.size(-1):
@@ -135,22 +154,27 @@ class FMGCN(FMGNN):
             """
             Compute and update the OB nodes embeddings for next layer, using the embeddings of IB nodes computed in current layer. This is the core operation of GraphFM.
             """
+            m.start('Forward_3: conv_IB2OB')
             feat_IB2OB = conv(block_IB2OB, feat_IB2OB)
+            m.stop('Forward_3: conv_IB2OB')
             if self.batch_norm:
                 bn.eval()
                 feat_IB2OB = bn(feat_IB2OB)
                 bn.train()
             feat_IB2OB = feat_IB2OB.relu_()
             hist_device = hist.emb.device
+            m.start('Forward_4: FM_and_OB_update')
             hist.FM_and_hist_update(feat_IB2OB, block_IB2OB.dstdata[dgl.NID].to(hist_device))
+            m.stop('Forward_4: FM_and_OB_update')
 
-            # tic = time.time()
+            m.start('Forward_5: push_and_pull')
             feat = self.push_and_pull(hist, feat, *args)
-            # toc = time.time() 
-            # print("pull and push time for layer {}: {:4f}".format(num_layer, toc - tic))
+            m.stop('Forward_5: push_and_pull')
             feat = F.dropout(feat, p=self.dropout, training=self.training)
         
+        m.start('Forward_6: conv_final_layer')
         h = self.convs[-1](block_2IB, feat)
+        m.stop('Forward_6: conv_final_layer')
 
         if not self.linear:
             return h
@@ -177,7 +201,7 @@ class FMGCN(FMGNN):
         h = self.convs[layer_number](block, feat)
 
         if layer_number < self.num_layers - 1 or self.linear:
-            if self.batch_norm:
+            if self.batch_norm: 
                 h = self.bns[layer_number](h)
             if self.residual and h.size(-1) == feat.size(-1):
                 h += feat[:h.size(0)]

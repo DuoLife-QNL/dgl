@@ -1,0 +1,3 @@
+defaults:
+  - device_settings: multi_gpu
+  - prof: no_prof
