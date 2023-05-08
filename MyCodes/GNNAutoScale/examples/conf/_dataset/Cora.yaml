@@ -12,7 +12,7 @@ dropout: 0.5
 num_parts: 40
 batch_size: 10
 inference_batch_size: null
-lr: 0.002
+lr: 0.01
 reg_weight_decay: 5e-4
 nonreg_weight_decay: 0.0
 grad_norm: 1.0

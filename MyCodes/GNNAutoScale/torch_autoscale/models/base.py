@@ -101,6 +101,8 @@ class ScalableGNN(torch.nn.Module):
         r"""Pushes and pulls information from :obj:`x` to :obj:`history` and
         vice versa."""
 
+        m = self.metric
+
         if n_id is None and x.size(0) != self.num_nodes:
             return x  # Do nothing...
 
@@ -115,9 +117,16 @@ class ScalableGNN(torch.nn.Module):
             return x
 
         if not self._async:
+            m.start("Push")
             history.push(x[:batch_size], n_id[:batch_size], offset, count)
+            m.stop("Push")
+            m.start("Pull")
             h = history.pull(n_id[batch_size:])
-            return torch.cat([x[:batch_size], h], dim=0)
+            m.stop("Pull")
+            m.start('Concat IB and OB_hist')
+            ret = torch.cat([x[:batch_size], h], dim=0)
+            m.stop('Concat IB and OB_hist')
+            return ret
 
         else:
             out = self.pool.synchronize_pull()[:n_id.numel() - batch_size]

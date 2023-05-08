@@ -189,9 +189,9 @@ class SubgraphConstructor(object):
         self.metric.start('H2D: subgraph all2IB')
         subgraph = subgraph.to(self.device)
         self.metric.stop('H2D: subgraph all2IB')
-        self.metric.start('to_block: subgraph all2IB')
+        # self.metric.start('to_block: subgraph all2IB')
         block = dgl.to_block(subgraph, dst_nodes=IB_nodes)
-        self.metric.stop('to_block: subgraph all2IB')
+        # self.metric.stop('to_block: subgraph all2IB')
         block.num_nodes_in_each_batch = torch.tensor([batch.size(dim=0) for batch in batches])
         return [block for _ in range(self.num_layers)]
 
@@ -210,9 +210,9 @@ class SubgraphConstructor(object):
         subgraph_all2IB = subgraph_all2IB.to(self.device)
         self.metric.stop('H2D: subgraph_all2IB')
         
-        self.metric.start('to_block: subgraph all2IB')
+        # self.metric.start('to_block: subgraph all2IB')
         block_all2IB = dgl.to_block(subgraph_all2IB, dst_nodes=IB_nodes)
-        self.metric.stop('to_block: subgraph all2IB')
+        # self.metric.stop('to_block: subgraph all2IB')
 
         """
         Construct block IB2OB
@@ -306,9 +306,9 @@ def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: b
     for it, blocks in enumerate(loader):
         block = blocks[0]
         optimizer.zero_grad()
-        metric.start('H2D: block_all2IB')
+        # metric.start('H2D: block_all2IB')
         block = block.to(device)
-        metric.stop('H2D: block_all2IB')
+        # metric.stop('H2D: block_all2IB')
         metric.start('parse_arg')
         args = parse_args_from_block(block, training=True)
         metric.stop('parse_arg')
@@ -348,10 +348,10 @@ def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: 
         # num_output_nodes = block.num_dst_nodes()
         # num_edges = block.num_edges()
         # print("block_num_input_nodes: {}, block_num_output_nodes: {}, block_num_edges: {}".format(num_input_nodes, num_output_nodes, num_edges))
-        metric.start('H2D: block_all2IB & block_IB2OB')
+        # metric.start('H2D: block_all2IB & block_IB2OB')
         block_all2IB = block_all2IB.to(device)
         block_IB2OB = block_IB2OB.to(device)
-        metric.stop('H2D: block_all2IB & block_IB2OB')
+        # metric.stop('H2D: block_all2IB & block_IB2OB')
 
         metric.start('parse_arg')
         feat, num_output_nodes, n_ids, offset, count = parse_args_from_block(block_all2IB, training=True)
@@ -473,6 +473,8 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
     torch.cuda.set_device(dev_id)
     device = f'cuda:{dev_id}'
 
+    pid = os.getpid()
+    print('pid: {}, device id: {}'.format(pid, dev_id))
 
     g, batches, in_size, out_size, train_mask, val_mask, labels = dataset_info
     if INFERENCE_BATCH_SIZE is None:
@@ -492,7 +494,7 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
         'batch_size': BATCH_SIZE
     }
     if world_size > 1:
-        dist_sampler = DistributedSampler(dataset=batches, shuffle=True)
+        dist_sampler = DistributedSampler(dataset=batches, shuffle=SHUFFLE_DATA)
         loader_args['sampler'] = dist_sampler
     else:
         loader_args['shuffle'] = SHUFFLE_DATA
@@ -502,23 +504,6 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
         loader_args['collate_fn'] = constructor.construct_subgraphs_fm
     
     subgraph_loader = TorchDataLoader(**loader_args)
-
-    # if TRAINING_METHOD == 'gas':
-    #     subgraph_loader = TorchDataLoader(
-    #         dataset = batches,
-    #         batch_size=BATCH_SIZE,
-    #         collate_fn = constructor.construct_subgraph_gas,
-    #         shuffle=SHUFFLE_DATA,
-    #         sampler=dist_sampler
-    #     )
-    # elif TRAINING_METHOD == 'graphfm':
-    #     subgraph_loader = TorchDataLoader(
-    #         dataset = batches,
-    #         batch_size=BATCH_SIZE,
-    #         collate_fn = constructor.construct_subgraphs_fm,
-    #         shuffle=SHUFFLE_DATA,
-    #         sampler=dist_sampler
-    #     )
 
     best_val_acc = test_acc = 0
     
@@ -581,7 +566,9 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
                 fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
         metric.stop('epoch')
         train_timer.end()
-        log.info("Train time (s): {:4f}".format(train_timer.duration()))
+        if rank == 0:
+            log.info("Train time (s): {:4f}".format(train_timer.duration()))
+            print("Train time (s): {:4f}".format(train_timer.duration()))
         if epoch % TEST_EVERY == 0 and rank == 0:
             test_timer = Timer()
             test_timer.start()
@@ -602,6 +589,9 @@ def run(rank, world_size, devices: List[int], dataset_info, conf: DictConfig, pr
             
             log.info("Test time (s): {:4f}".format(test_timer.duration()))
             log.info(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
+                f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
+            print("Test time (s): {:4f}".format(test_timer.duration()))
+            print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
         # prevent from dgl cuda OOM
         # torch.cuda.empty_cache()
