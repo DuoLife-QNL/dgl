@@ -1,3 +1,5 @@
+import os
+import time
 from typing import Optional, Callable, Dict
 
 import warnings
@@ -43,10 +45,13 @@ class ScalableGNN(torch.nn.Module):
             maximum number of out-of-mini-batch nodes pulled at once.
             Needs to be set in order to make use of asynchronous memory
             transfers. (default: :obj:`None`)
+        device: The historical cache will be initialized on this device.
     """
     def __init__(self, num_nodes: int, hidden_channels: int, num_layers: int,
                  pool_size: Optional[int] = None,
-                 buffer_size: Optional[int] = None, device=None,
+                 buffer_size: Optional[int] = None, 
+                 histories: Optional[torch.nn.ModuleList] = None,
+                 device=None,
                  metric: Optional[Metric] = None):
         super().__init__()
 
@@ -56,10 +61,12 @@ class ScalableGNN(torch.nn.Module):
         self.pool_size = num_layers - 1 if pool_size is None else pool_size
         self.buffer_size = buffer_size
 
-        self.histories = torch.nn.ModuleList([
-            History(num_nodes, hidden_channels, device)
-            for _ in range(num_layers - 1)
-        ])
+        self.histories = histories
+        if self.histories is None:
+            self.histories = torch.nn.ModuleList([
+                History(num_nodes, hidden_channels, device)
+                for _ in range(num_layers - 1)
+            ])
 
         self.pool: Optional[AsyncIOPool] = None
         self._async = False
@@ -117,10 +124,16 @@ class ScalableGNN(torch.nn.Module):
             return x
 
         if not self._async:
+            m.set("push_num_nodes", batch_size)
+            m.set("push_num_dim", x.size(1))
             m.start("Push")
             history.push(x[:batch_size], n_id[:batch_size], offset, count)
+            # print("process pid: {} finishes push, time: {}".format(os.getpid(), time.time()))
+            # print("histories push count: {}".format(history.get_push_count()))
             m.stop("Push")
             m.start("Pull")
+            m.set("pull_num_nodes", n_id.numel() - batch_size)
+            m.set("pull_num_dim", x.size(1))
             h = history.pull(n_id[batch_size:])
             m.stop("Pull")
             m.start('Concat IB and OB_hist')
@@ -199,10 +212,12 @@ class ScalableGNN(torch.nn.Module):
 class GASGNN(ScalableGNN):
     def __init__(self, num_nodes: int, hidden_channels: int, num_layers: int,
                 pool_size: Optional[int] = None,
-                buffer_size: Optional[int] = None, device=None,
+                buffer_size: Optional[int] = None, 
+                histories: Optional[torch.nn.ModuleList] = None,
+                device=None,
                 metric: Optional[Metric] = None):
         super().__init__(num_nodes, hidden_channels, num_layers, pool_size,
-                        buffer_size, device, metric)
+                        buffer_size, histories, device, metric)
     def __call__(
         self,
         block_2IB: DGLBlock,
@@ -260,8 +275,9 @@ class GASGNN(ScalableGNN):
         if (batch_size is not None and not self._async
                 and str(self.emb_device) == 'cpu'
                 and str(self.device)[:4] == 'cuda'):
-            warnings.warn('Asynchronous I/O disabled, although history and '
-                          'model sit on different devices.')
+            # warnings.warn('Asynchronous I/O disabled, although history and '
+            #               'model sit on different devices.')
+                pass
 
         if self._async:
             for hist in self.histories:

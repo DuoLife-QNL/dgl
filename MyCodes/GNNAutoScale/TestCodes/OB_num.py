@@ -7,7 +7,6 @@ import pickle
 import logging
 from torch_autoscale.Metric import Metric
 
-from MyTimer import Timer
 from load_reddit_dataset import load_reddit
 from torch_autoscale.models import GCN, FMGCN
 from torch_autoscale import compute_micro_f1, History
@@ -299,7 +298,7 @@ def parse_args_from_block(block, training=True):
 
         return feat, num_output_nodes, n_ids, offset, count
 
-def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
+def gas_train(model: GCN, loader: TorchDataLoader, optimizer, num_total_nodes, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
     if metric is None:
         metric = Metric()
     model.train()
@@ -308,36 +307,12 @@ def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: b
     
     for it, blocks in enumerate(loader):
         block = blocks[0]
-        optimizer.zero_grad()
-        # metric.start('H2D: block_all2IB')
-        block = block.to(device)
-        # metric.stop('H2D: block_all2IB')
-        metric.start('parse_arg')
-        args = parse_args_from_block(block, training=True)
-        metric.stop('parse_arg')
-        metric.start('forward')
-        out = model(block, *args)
-        metric.stop('forward')
-        train_mask = block.dstdata['train_mask']
-        loss = criterion(out[train_mask], block.dstdata['label'][train_mask])
-        # print("Iteration {} | Loss {:.4f}".format(it, loss.item()))
-        # log.info("Iteration {} | Loss {:.4f}".format(it, loss.item()))
+        num_OB = block.num_src_nodes() - block.num_dst_nodes()
+        num_IB = block.num_dst_nodes()
+        ratio = num_OB / (num_total_nodes - num_IB)
+        metric.set('OB_ratio', ratio)
 
-        if acc_log:
-            writer.add_scalar('train_loss', loss, global_iter())
-        metric.start('backward')
-        loss.backward()
-        metric.stop('backward')
-        if grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm)
-        optimizer.step()
-        # for obj in gc.get_objects():
-        #     try:
-        #         if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-        #             print(type(obj), obj.size())
-        #     except:
-        #         pass
-
+        
 def fm_train(model: FMGCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
     if metric is None:
         metric = Metric()
@@ -487,8 +462,8 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
     print('pid: {}, device id: {}'.format(pid, dev_id))
 
     g, batches, in_size, out_size, train_mask, val_mask, labels = dataset_info
+    num_total_nodes = g.num_nodes()
     if INFERENCE_BATCH_SIZE is None:
-        num_total_nodes = g.num_nodes()
         num_partitions_per_it = BATCH_SIZE
         num_partitions = NUM_PARTS
         INFERENCE_BATCH_SIZE = num_partitions_per_it * (num_total_nodes // num_partitions)
@@ -571,7 +546,7 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
         metric.start('epoch (train)')
         with record_function("2: Train"):
             if TRAINING_METHOD == 'gas':
-                gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+                gas_train(model, subgraph_loader, optimizer, num_total_nodes,device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
             elif TRAINING_METHOD == 'graphfm':
                 fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
         metric.stop('epoch (train)')
@@ -622,7 +597,7 @@ def test(rank, world_size, q):
     log = logging.getLogger("Process-{}".format(rank))
     log.log(logging.INFO, "Process-{}: {}".format(rank, os.getpid()))
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="../examples/conf", config_name="config")
 def main(conf: DictConfig):
     dataset_settings = conf._dataset
     run_env = conf.run_env

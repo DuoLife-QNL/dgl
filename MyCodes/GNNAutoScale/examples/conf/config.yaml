@@ -1,4 +1,4 @@
 defaults:
   - _dataset: Cora
-  - run_env: single_gpu_no_prof
+  - run_env: single_gpu
   - training_method: gas

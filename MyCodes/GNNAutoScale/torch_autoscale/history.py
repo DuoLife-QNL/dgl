@@ -6,17 +6,23 @@ from torch import Tensor
 
 class History(torch.nn.Module):
     r"""A historical embedding storage module."""
-    def __init__(self, num_embeddings: int, embedding_dim: int, device=None):
+    def __init__(self, num_embeddings: int, embedding_dim: int, device=None, mv2share_memory=False):
         super().__init__()
 
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
 
         pin_memory = device is None or str(device) == 'cpu'
-        self.emb = torch.empty(num_embeddings, embedding_dim, device=device,
+        if mv2share_memory:
+            self.emb = torch.empty(num_embeddings, embedding_dim, device=device,
+                               pin_memory=pin_memory).share_memory_()
+        else:
+            self.emb = torch.empty(num_embeddings, embedding_dim, device=device,
                                pin_memory=pin_memory)
 
         self._device = torch.device('cpu')
+
+        self._push_count = torch.zeros(1, dtype=torch.int32).share_memory_()
 
         self.reset_parameters()
 
@@ -61,6 +67,8 @@ class History(torch.nn.Module):
                 self.emb[dst_o:dst_o + c] = x[src_o:src_o + c]
                 src_o += c
 
+        self._push_count[0] = self._push_count[0].item() + 1
+
     def forward(self, *args, **kwargs):
         """"""
         raise NotImplementedError
@@ -69,6 +77,12 @@ class History(torch.nn.Module):
         return (f'{self.__class__.__name__}({self.num_embeddings}, '
                 f'{self.embedding_dim}, emb_device={self.emb.device}, '
                 f'device={self._device})')
+    
+    def get_push_count(self):
+        return self._push_count.item()
+    
+    def reset_push_count(self):
+        self._push_count = torch.zeros(1, dtype=torch.int32).share_memory_()
 
 class FMHistory(History):
     def __init__(self, num_embeddings: int, embedding_dim: int, device=None, gamma: float = 0.0):

@@ -32,6 +32,7 @@ class Metric(ContextDecorator):
         self.times = {}
         self.counts = {}
         self.starts = {}
+        self.sets = {}
         self._name = name
         if name is None and timer_name is None:
             self._name = "pid_{}_time_{}".format(os.getpid(), time.strftime("%Y%m%d%H%M%S", time.localtime()))
@@ -55,25 +56,32 @@ class Metric(ContextDecorator):
         self.times[name].append(time.time() - self.starts[name])
         self.counts[name] += 1
 
-    def count(self, name):
+    def set(self, name, value):
+        if name not in self.sets:
+            self.sets[name] = []
+            self.counts[name] = 0
+        self.sets[name].append(value)
+        self.counts[name] += 1
+         
+    def _get_count(self, name):
         if name in self.counts:
             return self.counts[name]
         else:
             return 0
-
-    def average(self, name):
+    
+    def _average(self, name):
         if name in self.times and self.counts[name] > 0:
             return sum(self.times[name]) / self.counts[name]
         else:
             return 0
 
-    def max_time(self, name):
+    def _max_time(self, name):
         if name in self.times and self.counts[name] > 0:
             return max(self.times[name])
         else:
             return 0
 
-    def min_time(self, name):
+    def _min_time(self, name):
         if name in self.times and self.counts[name] > 0:
             return min(self.times[name])
         else:
@@ -87,30 +95,27 @@ class Metric(ContextDecorator):
             self._print_metrics()
         if self._logger:
             self._log_metrics()
-
-    # def _print_metrics(self, output_file=None):
-    #     print("Metrics for {}".format(self._name), file=output_file)
-    #     header = "{:<20} {:<10} {:<10} {:<10} {:<10}".format('Name', 'Count', 'Average', 'Max', 'Min')
-    #     print(header, file=output_file)
-    #     for name in self.counts.keys():
-    #         count = self.counts[name]
-    #         avg = self.average(name)
-    #         max_time = self.max_time(name)
-    #         min_time = self.min_time(name)
-    #         line = "{:<20} {:<10} {:<10.6f} {:<10.6f} {:<10.6f}".format(name, count, avg, max_time, min_time)
-    #         print(line, file=output_file)
-
+    
+    def logger_print_metrics(self):
+        self._log_metrics()
+        
     def _print_metrics(self, output_file=None):
         table = PrettyTable()
-        table.field_names = ["Name", "Count", "Average", "Max", "Min"]
+        table.field_names = ["Name", "Count", "Average", "Max", "Min", "Category"]
         table.float_format = ".4"
         table.align["Name"] = "l"
-        for name in self.counts.keys():
-            count = self.counts[name]
-            avg = self.average(name)
-            max_time = self.max_time(name)
-            min_time = self.min_time(name)
-            table.add_row([name, count, avg, max_time, min_time])
+        for name in self.times.keys():
+            count = self._get_count(name)
+            avg = self._average(name)
+            max_time = self._max_time(name)
+            min_time = self._min_time(name)
+            table.add_row([name, count, avg, max_time, min_time, "Time"])
+        for name in self.sets.keys():
+            count = self._get_count(name)
+            avg = sum(self.sets[name]) / count
+            max_value = max(self.sets[name])
+            min_value = min(self.sets[name])
+            table.add_row([name, count, avg, max_value, min_value, "Value"])
         table.title = "Metrics for {}".format(self._name)
         if output_file:
             with open(output_file, 'w') as f:
@@ -118,32 +123,24 @@ class Metric(ContextDecorator):
         else:
             print(table)
 
-    # def _log_metrics(self, log: Optional[Logger] = None):
-    #     if log is None:
-    #         log = self._logger
-    #     log.info("Metrics for {}".format(self._name))
-    #     header = "{:<20} {:<10} {:<10} {:<10} {:<10}".format('Name', 'Count', 'Average', 'Max', 'Min')
-    #     log.info(header)
-    #     for name in self.counts.keys():
-    #         count = self.counts[name]
-    #         avg = self.average(name)
-    #         max_time = self.max_time(name)
-    #         min_time = self.min_time(name)
-    #         line = "{:<20} {:<10} {:<10.6f} {:<10.6f} {:<10.6f}".format(name, count, avg, max_time, min_time)
-    #         log.info(line)
-
     def _log_metrics(self, log: Optional[Logger] = None):
         if log is None:
             log = self._logger
-        log.info("Metrics for {}".format(self._name))
-        header = ["Name", "Count", "Average", "Max", "Min"]
+        header = ["Name", "Count", "Average", "Max", "Min", "Category"]
         table = PrettyTable(header)
         table.float_format = ".4"
         table.align["Name"] = "l"
-        for name in self.counts.keys():
-            count = self.counts[name]
-            avg = self.average(name)
-            max_time = self.max_time(name)
-            min_time = self.min_time(name)
-            table.add_row([name, count, avg, max_time, min_time])
+        for name in self.times.keys():
+            count = self._get_count(name)
+            avg = self._average(name)
+            max_time = self._max_time(name)
+            min_time = self._min_time(name)
+            table.add_row([name, count, avg, max_time, min_time, "Time"])
+        for name in self.sets.keys():
+            count = self._get_count(name)
+            avg = sum(self.sets[name]) / count
+            max_value = max(self.sets[name])
+            min_value = min(self.sets[name])
+            table.add_row([name, count, avg, max_value, min_value, "Value"])
+        table.title = "Metrics for {}".format(self._name)
         log.info("\n" + str(table))

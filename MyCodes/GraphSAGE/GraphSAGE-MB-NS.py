@@ -1,4 +1,6 @@
+from typing import Optional
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics.functional as MF
@@ -6,11 +8,13 @@ from torchmetrics.functional.classification import multiclass_f1_score
 import dgl
 import dgl.nn as dglnn
 from dgl import AddSelfLoop
-from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset, RedditDataset
+from dgl.data import AsNodePredDataset, CiteseerGraphDataset, CoraGraphDataset, RedditDataset, PubmedGraphDataset
 from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborSampler
 from ogb.nodeproppred import DglNodePropPredDataset
 import tqdm
 import argparse
+
+import GPUtil
 
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -121,9 +125,11 @@ def train(args, device, g, dataset, model):
     seq = torch.arange(0, n_nodes)
     train_mask = g.ndata['train_mask']
     val_mask = g.ndata['val_mask']
+    test_mask = g.ndata['test_mask']
     train_idx = torch.masked_select(seq, train_mask)
     n_train_nodes = train_idx.size(0)
     val_idx = torch.masked_select(seq, val_mask)
+    test_idx = torch.masked_select(seq, test_mask)
     # With OGB dataset
     # train_idx = dataset.train_idx.to(device)
     # val_idx = dataset.val_idx.to(device)
@@ -146,10 +152,16 @@ def train(args, device, g, dataset, model):
                                 batch_size=1000, shuffle=True,
                                 drop_last=False, num_workers=0,
                                 use_uva=use_uva)
+    test_dataloader = DataLoader(g, test_idx, sampler, device=device,
+                                    batch_size=1000, shuffle=True,
+                                    drop_last=False, num_workers=0,
+                                    use_uva=use_uva)
 
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
 
-    prof.start()
+    if PROFILING:
+        prof.start()
+    max_mem = 0
     for epoch in range(args.num_epochs):
         model.train()
         total_loss = 0
@@ -161,7 +173,7 @@ def train(args, device, g, dataset, model):
                 block_input_node_number = block.number_of_src_nodes()
                 block_output_node_number = block.number_of_dst_nodes()
                 block_nedges = block.number_of_edges()
-                print("number of epoch: {}, number of iteration: {}, block_input_node_number: {}, block_output_node_number: {}, block_nedges: {}".format(epoch, it, block_input_node_number, block_output_node_number, block_nedges))
+                # print("number of epoch: {}, number of iteration: {}, block_input_node_number: {}, block_output_node_number: {}, block_nedges: {}".format(epoch, it, block_input_node_number, block_output_node_number, block_nedges))
             with record_function("Forward Computation"):
                 y_hat = model(blocks, x)
             loss = F.cross_entropy(y_hat, y)
@@ -169,12 +181,19 @@ def train(args, device, g, dataset, model):
             loss.backward()
             opt.step()
             total_loss += loss.item()
-            prof.step()
+            if PROFILING:
+                prof.step()
+        torch.cuda.empty_cache()
+        GPUs = GPUtil.getGPUs()
+        if GPUs[0].memoryUsed > max_mem:
+            max_mem = GPUs[0].memoryUsed
         micro_f1 = evaluate(model, g, val_dataloader)
-
-        print("Epoch {:05d} | Loss {:.4f} | Micro_F1 {:.4f} "
-              .format(epoch, total_loss / (it+1), micro_f1))
-    prof.stop()
+        test_micro_f1 = evaluate(model, g, test_dataloader)
+        print("Epoch {:05d} | Loss {:.4f} | Val_Micro_F1 {:.4f} | Test_Micro_F1 {:.4f} "
+              .format(epoch, total_loss / (it+1), micro_f1, test_micro_f1))
+    if PROFILING:
+        prof.stop()
+    print("Max memory used: {}".format(max_mem))
     # print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time"))
 
 if __name__ == '__main__':
@@ -184,24 +203,26 @@ if __name__ == '__main__':
     #                     help="Training mode. 'cpu' for CPU training, 'mixed' for CPU-GPU mixed training, "
     #                          "'puregpu' for pure-GPU training."
     # )
-    parser.add_argument("--num-hidden", type=int, default=256, help="Size of hidden layer.")
+    parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=38000)
-    parser.add_argument("--num-epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=35)
+    parser.add_argument("--num-epochs", type=int, default=200)
     args = parser.parse_args()
     # if not torch.cuda.is_available():
     #     args.mode = 'cpu'
     # print(f'Training in {args.mode} mode.')
 
-    device = torch.device("cuda")
-    dev_id = int(args.gpu)
-    torch.cuda.set_device(dev_id)
+    # device = torch.device("cuda")
+    # dev_id = int(args.gpu)
+    device = 'cuda:0'
+    # torch.cuda.set_device(dev_id)
     # load and preprocess dataset
     print('Loading data')
     # dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-products'))
-    # dataset = CiteseerGraphDataset(transform=AddSelfLoop())
-    # dataset = CoraGraphDataset(transform=AddSelfLoop())
-    dataset = RedditDataset(transform=AddSelfLoop())
+    # dataset = CiteseerGraphDataset()
+    dataset = CoraGraphDataset()
+    # dataset  = PubmedGraphDataset()
+    # dataset = RedditDataset(transform=AddSelfLoop())
     g = dataset[0]
     # g = g.to('cuda' if args.mode == 'puregpu' else 'cpu')
     g = g.to('cpu')
@@ -215,8 +236,3 @@ if __name__ == '__main__':
     # model training
     print('Training...')
     train(args, device, g, dataset, model)
-
-    # test the model
-    # print('Testing...')
-    # acc = layerwise_infer(device, g, dataset.test_idx, model, batch_size=4096)
-    # print("Test Accuracy {:.4f}".format(acc.item()))

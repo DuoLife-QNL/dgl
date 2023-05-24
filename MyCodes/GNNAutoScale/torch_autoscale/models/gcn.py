@@ -10,6 +10,7 @@ import dgl
 import dgl.nn as dglnn
 from torch_autoscale.models import ScalableGNN, GASGNN
 from torch_autoscale.Metric import Metric
+from torch_autoscale import History
 from dgl.heterograph import DGLBlock
 
 
@@ -20,9 +21,10 @@ class GCN(GASGNN):
                  residual: bool = False, linear: bool = False,
                  pool_size: Optional[int] = None,
                  buffer_size: Optional[int] = None, device=None,
+                 histories: Optional[torch.nn.ModuleList] = None,
                  metric: Optional[Metric] = None):
         super().__init__(num_nodes, hidden_channels, num_layers, pool_size,
-                         buffer_size, device, metric)
+                         buffer_size, histories, device, metric)
 
         self.in_channels = in_channels
         self.out_channels = out_channels

@@ -1,3 +1,4 @@
 name: graphfm
 
 ib2ob_construct: naive
+one_cache: false
