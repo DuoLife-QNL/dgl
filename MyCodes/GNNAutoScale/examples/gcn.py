@@ -7,7 +7,6 @@ import pickle
 import logging
 from torch_autoscale.Metric import Metric
 
-from MyTimer import Timer
 from load_reddit_dataset import load_reddit
 from torch_autoscale.models import GCN, FMGCN
 from torch_autoscale import compute_micro_f1, History
@@ -288,7 +287,7 @@ def parse_args_from_block(block, training=True):
         # only those nodes in input-nodes yet not in input-nodes are out-batch-nodes
         input_nodes = block.srcdata[dgl.NID].to('cpu')
         OB_nodes = input_nodes.index_select(0, torch.arange(output_nodes.size(0), input_nodes.size(0)))
-        n_ids = torch.cat((IB_nodes, OB_nodes), dim=0)
+        n_ids = torch.cat((IB_nodes, OB_nodes), dim=0).to(block.device)
         count = block.num_nodes_in_each_batch
         index = 0
         lead_node_id = torch.tensor([0])
@@ -444,6 +443,10 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
     writer, global_iter, prof = prof_utils
     metric = Metric(logger=log)
 
+    for history in histories:
+        history: History
+        history.add_metric(metric)
+
     # Hyperparameters
     # GCN Norm is set to True ('both' in GraphConv) by default
     NUM_LAYERS = dataset_settings.num_layers
@@ -569,11 +572,10 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
     max_mem = 0
     for epoch in range(0, EPOCHS):
         metric.start('epoch (train)')
-        with record_function("2: Train"):
-            if TRAINING_METHOD == 'gas':
-                gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
-            elif TRAINING_METHOD == 'graphfm':
-                fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+        if TRAINING_METHOD == 'gas':
+            gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+        elif TRAINING_METHOD == 'graphfm':
+            fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
         metric.stop('epoch (train)')
         if epoch % TEST_EVERY == 0 and rank == 0:
             metric.start('test')
@@ -628,6 +630,7 @@ def main(conf: DictConfig):
     run_env = conf.run_env
     profiling_settings = run_env.prof
     device_settings = run_env.device_settings
+    opt_settings = conf.opt
 
     METIS_PARTITION = dataset_settings.metis_partition
     PART_PATH = dataset_settings.part_path
@@ -643,6 +646,7 @@ def main(conf: DictConfig):
     ONE_CACHE : str = conf.training_method.one_cache
     NUM_LAYERS = dataset_settings.num_layers
     HIDDEN_CHANNELS = dataset_settings.hidden_channels
+    SET_GPU_CACHE = opt_settings.gpu_cache
 
     # check if GPU is type int 
 
@@ -664,14 +668,14 @@ def main(conf: DictConfig):
 
     g.create_formats_()
 
-    def init_cache() -> torch.nn.ModuleList:
+    def init_cache(one_cache) -> torch.nn.ModuleList:
         histories = torch.nn.ModuleList([
-            History(g.num_nodes(), HIDDEN_CHANNELS, mv2share_memory=True)
+            History(g.num_nodes(), HIDDEN_CHANNELS, mv2share_memory=one_cache, set_gpu_cache=SET_GPU_CACHE, g=g, cache_size=100000, gpu_device=devices[0] if n_gpus == 1 else None)
             for _ in range(NUM_LAYERS - 1)
         ])
         return histories
 
-    histories = init_cache() if ONE_CACHE and n_gpus > 1 else None
+    histories = init_cache(ONE_CACHE)
     
     q = Queue()
     # q = SimpleQueue()
@@ -689,7 +693,7 @@ def main(conf: DictConfig):
     # lp.start()
 
     if n_gpus == 1:
-        run(0, n_gpus, devices, None, dataset_info, conf, profiling_utils, q)
+        run(0, n_gpus, devices, histories, dataset_info, conf, profiling_utils, q)
     else:
         # workers = []
         # for i in range(n_gpus):

@@ -136,9 +136,7 @@ class ScalableGNN(torch.nn.Module):
             m.set("pull_num_dim", x.size(1))
             h = history.pull(n_id[batch_size:])
             m.stop("Pull")
-            m.start('Concat IB and OB_hist')
             ret = torch.cat([x[:batch_size], h], dim=0)
-            m.stop('Concat IB and OB_hist')
             return ret
 
         else:
