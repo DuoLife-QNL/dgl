@@ -44,7 +44,7 @@ def main():
     data_push = torch.randn(153026, 256)
     # data_push = torch.randn(58241, 256)
     data_pull = torch.randn(153026, 256)
-    # 用fork比spwan快很多
+    # 用fork比spawn快很多
     multiprocessing.set_start_method('fork')
     for _ in range(runs):
         for combination in combinations:

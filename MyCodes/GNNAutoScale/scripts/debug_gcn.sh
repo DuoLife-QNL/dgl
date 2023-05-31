@@ -1,2 +1,2 @@
 cd /home/lihz/Codes/dgl/MyCodes
-python -m debugpy --listen 0.0.0.0:5828 --wait-for-client GNNAutoScale/examples/gcn.py training_method=gas _dataset=Reddit2 run_env=single_gpu _dataset.epochs=30 _dataset.test_every=1 opt.gpu_cache=true
+python -m debugpy --listen 0.0.0.0:5828 --wait-for-client GNNAutoScale/examples/gcn.py training_method=gas _dataset=Cora run_env=multi_gpu opt.gpu_cache=false _dataset.epochs=10 run_env.device_settings.device=\'2,3\'

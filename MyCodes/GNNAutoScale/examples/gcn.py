@@ -418,11 +418,11 @@ def layerwise_minibatch_test(model: GCN, g: dgl.DGLGraph, out_size: int, device,
 
 
 def run(rank, world_size, devices: List[int], histories, dataset_info, conf: DictConfig, prof_utils: Tuple, q: Queue):
-    # if world_size > 1:
-    #     qh = logging.handlers.QueueHandler(q)
-    #     root = logging.getLogger()
-    #     root.setLevel(logging.DEBUG)
-    #     root.addHandler(qh)
+    if world_size > 1:
+        qh = logging.handlers.QueueHandler(q)
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        root.addHandler(qh)
     log = logging.getLogger("Process-{}".format(rank))
     dataset_settings = conf._dataset
     run_env = conf.run_env
@@ -569,7 +569,6 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
     Training Loop
     """
     # torch.cuda.empty_cache()
-    max_mem = 0
     for epoch in range(0, EPOCHS):
         metric.start('epoch (train)')
         if TRAINING_METHOD == 'gas':
@@ -577,7 +576,7 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
         elif TRAINING_METHOD == 'graphfm':
             fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
         metric.stop('epoch (train)')
-        if epoch % TEST_EVERY == 0 and rank == 0:
+        if epoch % TEST_EVERY == 0 and rank == 2:
             metric.start('test')
             train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(
                 model if world_size == 1 else model.module,
@@ -598,18 +597,22 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
             # print("Test time (s): {:4f}".format(test_timer.duration()))
             print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
+        if world_size > 1:
+            for history in histories:
+                if history.set_gpu_cache:
+                    metric.start("sync-cache")
+                    history.sync_cache()
+                    metric.stop("sync-cache")
         # prevent from dgl cuda OOM
         torch.cuda.empty_cache()
         GPUs = GPUtil.getGPUs()
-        if GPUs[0].memoryUsed > max_mem:
-            max_mem = GPUs[0].memoryUsed
+        metric.set("GPU Memory Usage", GPUs[0].memoryUsed)
         if PROFILING:
             prof.step()
         if world_size > 1:
             dist.barrier()
 
-    log.info("Max Memory Usage: {:.4f} MB".format(max_mem))
-    metric.logger_print_metrics()
+    # metric.logger_print_metrics()
     metric.print_metrics()
     if PROFILING:
         prof.stop()
@@ -670,13 +673,15 @@ def main(conf: DictConfig):
 
     def init_cache(one_cache) -> torch.nn.ModuleList:
         histories = torch.nn.ModuleList([
-            History(g.num_nodes(), HIDDEN_CHANNELS, mv2share_memory=one_cache, set_gpu_cache=SET_GPU_CACHE, g=g, cache_size=100000, gpu_device=devices[0] if n_gpus == 1 else None)
+            History(g.num_nodes(), HIDDEN_CHANNELS, mv2share_memory=one_cache, set_gpu_cache=SET_GPU_CACHE, g=g, cache_size=100000, gpu_device=devices[0] if n_gpus == 1 else None, multiprocessing=True if n_gpus > 1 else False)
             for _ in range(NUM_LAYERS - 1)
         ])
         return histories
 
     histories = init_cache(ONE_CACHE)
-    
+
+    # NOTE: Authough I do not know the exact reason, but it seems this command has to be put before all mp invokes to make it work
+    mp.set_start_method('forkserver', force=True)
     q = Queue()
     # q = SimpleQueue()
 
@@ -689,26 +694,16 @@ def main(conf: DictConfig):
             logger.handle(record)
     
     
-    # lp = threading.Thread(target=logger_thread, args=(q,))
-    # lp.start()
+    lp = threading.Thread(target=logger_thread, args=(q,))
+    lp.start()
 
     if n_gpus == 1:
         run(0, n_gpus, devices, histories, dataset_info, conf, profiling_utils, q)
     else:
-        # workers = []
-        # for i in range(n_gpus):
-        #     wp = mp.Process(target=run, args=(i, n_gpus, devices, histories, dataset_info, conf, profiling_utils, q))
-        #     workers.append(wp)
-        #     wp.start()
         mp.spawn(run, args=(n_gpus, devices, histories, dataset_info, conf, profiling_utils, q), nprocs=n_gpus)
-        # mp.spawn(test, args=(n_gpus, q), nprocs=n_gpus)
 
-    # if n_gpus > 1:
-    #     for wp in workers:
-    #         wp.join()
-
-    # q.put(None)
-    # lp.join()
+    q.put(None)
+    lp.join()
 
 if __name__ == '__main__':
     main()

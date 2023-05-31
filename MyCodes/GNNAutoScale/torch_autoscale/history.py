@@ -7,16 +7,21 @@ from dgl import DGLGraph
 
 from torch_autoscale import Metric
 
+import torch.distributed as dist
+
 class GPUCache(object):
-    def __init__(self, embedding_dim: int, g: DGLGraph, cache_size: int, device) -> None:
+    def __init__(self, embedding_dim: int, g: DGLGraph, cache_size: int, device, multiprocessing = False) -> None:
         """
         Find top cache_size nodes with highest degrees in graph g, and cache their embeddings on GPU.
         """
+        self.multiprocessing = multiprocessing
         self.cache_size = cache_size
         self.device = device
         self.embedding_dim = embedding_dim
         self.g = g
         self.cache = torch.empty((cache_size, embedding_dim), device=self.device)
+        if self.multiprocessing:
+            self.updated_mask = torch.zeros(self.cache_size, dtype=torch.bool, device=self.device)
         # Sort nodes by degree in descending order, and get the node id of the top cache_size nodes
         self.cached_nodes_ids_cpu = torch.argsort(self.g.in_degrees(), descending=True)[:self.cache_size]
         self.cached_nodes_ids = self.cached_nodes_ids_cpu.to(device)
@@ -52,7 +57,10 @@ class GPUCache(object):
         push_info = self.split_by_device(n_ids, x)
         n_ids_push2GPU, x_push2GPU = push_info[0]
         n_ids_push2CPU, x_push2CPU = push_info[1]
-        self.cache[self.cached_nodes_ids_lookup[n_ids_push2GPU]] = x_push2GPU
+        indices = self.cached_nodes_ids_lookup[n_ids_push2GPU]
+        if self.multiprocessing:
+            self.updated_mask[indices] = True
+        self.cache[indices] = x_push2GPU
         return n_ids_push2CPU, x_push2CPU
     
     def pull_by_n_ids(self, n_ids: Tensor):
@@ -69,8 +77,18 @@ class GPUCache(object):
         """
         Initialize GPU cache. X is the embedding of all nodes.
         """
-        x_GPU_cache = x[self.cached_node_ids_cpu]
+        if self.multiprocessing:
+            self.updated_mask.fill_(False)
+        x_GPU_cache = x[self.cached_nodes_ids_cpu]
         self.cache = x_GPU_cache.to(self.device)
+
+    def pull_all_updated(self):
+        """
+        Pull embeddings of all nodes that are updated since initiation from GPU cache.
+        """
+        updated_n_ids = self.cached_nodes_ids[self.updated_mask]
+        updated_embeddings = self.cache[self.updated_mask]
+        return updated_n_ids, updated_embeddings
 
          
 
@@ -79,16 +97,17 @@ class History(torch.nn.Module):
     def __init__(
             self, num_embeddings: int, embedding_dim: int, hitory_cache_device=None, mv2share_memory=False, 
             set_gpu_cache=False, g: Optional[DGLGraph] = None, cache_size: Optional[int] = None,
-            gpu_device = None
+            gpu_device = None, multiprocessing=False
         ):
         super().__init__()
-
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
+        self.g = g
+        self.cache_size = cache_size
+        self.multiprocessing = multiprocessing
             
         self.gpu_cache: Optional[GPUCache] = None
-        if set_gpu_cache:
-            self.gpu_cache = GPUCache(embedding_dim, g, cache_size, gpu_device)
+        self.set_gpu_cache = set_gpu_cache
 
         pin_memory = hitory_cache_device is None or str(hitory_cache_device) == 'cpu'
         if mv2share_memory:
@@ -113,10 +132,12 @@ class History(torch.nn.Module):
     def _apply(self, fn):
         # Set the `_device` of the module without transfering `self.emb`.
         self._device = fn(torch.zeros(1)).device
+        if self.set_gpu_cache:
+            self.gpu_cache = GPUCache(self.embedding_dim, self.g, self.cache_size, self._device, multiprocessing=self.multiprocessing)
         return self
 
     @torch.no_grad()
-    def pull_without_gpu_cache(self, n_id: Optional[Tensor] = None) -> Tensor:
+    def _pull_without_gpu_cache(self, n_id: Optional[Tensor] = None) -> Tensor:
         out = self.emb
         if n_id is not None:
             # Move the n_id to device of embeddings for correctly run under pytorch DDP
@@ -133,12 +154,12 @@ class History(torch.nn.Module):
         return ret
 
     @torch.no_grad()
-    def pull_with_gpu_cache(self, n_id: Optional[Tensor] = None) -> Tensor:
+    def _pull_with_gpu_cache(self, n_id: Optional[Tensor] = None) -> Tensor:
         self.metric.start('Pull_1: pull_from_gpu')
         in_cache_mask, x_in_cache = self.gpu_cache.pull_by_n_ids(n_id)
         self.metric.stop('Pull_1: pull_from_gpu')
         self.metric.start('Pull_2: pull_from_cpu')
-        x_not_in_cache = self.pull_without_gpu_cache(n_id[~in_cache_mask])
+        x_not_in_cache = self._pull_without_gpu_cache(n_id[~in_cache_mask])
         self.metric.stop('Pull_2: pull_from_cpu')
         self.metric.set('pull_from_gpu_num_nodes', in_cache_mask.sum().item())
         self.metric.set('pull_from_cpu_num_nodes', (~in_cache_mask).sum().item())
@@ -156,13 +177,13 @@ class History(torch.nn.Module):
     @torch.no_grad()
     def pull(self, n_id: Optional[Tensor] = None) -> Tensor:
         if self.gpu_cache is None:
-            return self.pull_without_gpu_cache(n_id)
+            return self._pull_without_gpu_cache(n_id)
         else:
-            return self.pull_with_gpu_cache(n_id)
+            return self._pull_with_gpu_cache(n_id)
 
 
     @torch.no_grad()
-    def push_in_chunks(self, x, n_ids: Optional[Tensor] = None,
+    def _push_in_chunks(self, x, n_ids: Optional[Tensor] = None,
              offset: Optional[Tensor] = None, count: Optional[Tensor] = None):
 
         if n_ids is None and x.size(0) != self.num_embeddings:
@@ -189,8 +210,18 @@ class History(torch.nn.Module):
 
         self._push_count[0] = self._push_count[0].item() + 1
 
+    @torch.no_grad()
+    def _push_2CPU(self, x, n_ids: Optional[Tensor] = None):
+        self.metric.start('Push_1: transfer to CPU')
+        x = x.to(self.emb.device)
+        self.metric.stop('Push_1: transfer to CPU')
 
-    def push_with_gpu_cache(self, x, n_ids: Optional[Tensor] = None,
+        self.metric.start('Push_2: insert to history')
+        self.emb[n_ids] = x
+        self.metric.stop('Push_2: insert to history')
+
+    @torch.no_grad()
+    def _push_with_gpu_cache(self, x, n_ids: Optional[Tensor] = None,
              offset: Optional[Tensor] = None, count: Optional[Tensor] = None):
         if n_ids is None and x.size(0) != self.num_embeddings:
             raise ValueError
@@ -235,10 +266,17 @@ class History(torch.nn.Module):
     def push(self, x, n_ids: Optional[Tensor] = None,
              offset: Optional[Tensor] = None, count: Optional[Tensor] = None):
         if self.gpu_cache is not None:
-            self.push_with_gpu_cache(x, n_ids, offset, count)
+            self._push_with_gpu_cache(x, n_ids, offset, count)
         else:
-            self.push_in_chunks(x, n_ids, offset, count)
-        
+            self._push_in_chunks(x, n_ids, offset, count)
+
+    @torch.no_grad()
+    def sync_cache(self):
+        updated_n_ids, updated_x = self.gpu_cache.pull_all_updated()
+        self._push_2CPU(updated_x, updated_n_ids)
+        dist.barrier()
+        self.gpu_cache.init_GPU_cache(self.emb)
+
 
     def forward(self, *args, **kwargs):
         """"""
