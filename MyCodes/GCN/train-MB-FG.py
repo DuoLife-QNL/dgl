@@ -13,18 +13,20 @@ from dgl.dataloading import DataLoader, NeighborSampler, MultiLayerFullNeighborS
 
 from torchmetrics.functional.classification import multiclass_f1_score
 
+from Metric import Metric
+
 PROFILING = False
 DATASET = 'reddit'
 SELF_LOOP = True
 NUM_LAYERS = 2
 HIDDEN_CHANNELS = 256
 DROPOUT = 0.5
-BATCH_SIZE = 10
+BATCH_SIZE = 1000
 LR = 0.01
 WEIGHT_DECAY = 0.0
 
 DROP_INPUT = True
-EPOCHS = 400
+EPOCHS = 1
 
 
 class GCN(nn.Module):
@@ -70,6 +72,7 @@ def evaluate(model, dataloader):
 
 
 def train(g, features, labels, masks, model):
+    metric = Metric()
     # define train/val samples, loss function and optimizer
     train_mask = masks[0]
     # get training node indices from train mask
@@ -84,7 +87,8 @@ def train(g, features, labels, masks, model):
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     batch_size = BATCH_SIZE
     sampler = MultiLayerFullNeighborSampler(NUM_LAYERS, prefetch_node_feats=['feat'], prefetch_labels=['label'])
-    train_dataloader = DataLoader(g, train_idx, sampler, device=device,
+    train_dataloader = DataLoader(g, train_idx, sampler, 
+                                  device=device,
                                   batch_size=batch_size, shuffle=True,
                                   drop_last=False, num_workers=0)
     val_dataloader = DataLoader(g, val_idx, sampler, device=device,
@@ -116,28 +120,38 @@ def train(g, features, labels, masks, model):
         model.train()
         total_loss = 0
         for it, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
+            print("Iteration {}".format(it))
             x = blocks[0].srcdata['feat']
             y = blocks[-1].dstdata['label']
-            y_hat = model(blocks, x)
-            loss = F.cross_entropy(y_hat, y)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        val_acc = evaluate(model, val_dataloader)
-        test_acc = evaluate(model, test_dataloader)
+            # print the number of srouce nodes in each layer
+            for i in range(len(blocks)):
+                print("Layer {} souce nodes: {}".format(i, blocks[i].number_of_src_nodes()))
+                metric.set("Layer {} souce nodes".format(i), blocks[i].number_of_src_nodes())
+            print("Layer {} dest nodes: {}".format(len(blocks), blocks[-1].number_of_dst_nodes()))
+            metric.set("Layer {} dest nodes".format(len(blocks)), blocks[-1].number_of_dst_nodes())
+                # print("Number of input nodes for layer {}: {}".format(i, blocks[i].number_of_src_nodes()))
+            # print("Number of output nodes for layer {}: {}".format(len(blocks), blocks[-1].number_of_dst_nodes()))
+            # y_hat = model(blocks, x)
+            # loss = F.cross_entropy(y_hat, y)
+            # optimizer.zero_grad()
+            # loss.backward()
+            # optimizer.step()
+            # total_loss += loss.item()
+        # val_acc = evaluate(model, val_dataloader)
+        # test_acc = evaluate(model, test_dataloader)
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            cor_test_acc = test_acc
-        print("Epoch {:05d} | Loss {:.4f} | Val_Acc {:.4f} | Test_Acc {:.4f}"
-              .format(epoch, total_loss / (it+1), val_acc, test_acc))
-        if PROFILING:
-            prof.step()
-    print("Best Val Acc {:.4f} | Cor Test Acc {:.4f}".format(best_val_acc, cor_test_acc))
-    if PROFILING:
-        prof.stop()
-        print(prof.key_averages().table(sort_by="cpu_time_total"))
+        # if val_acc > best_val_acc:
+        #     best_val_acc = val_acc
+        #     cor_test_acc = test_acc
+        # print("Epoch {:05d} | Loss {:.4f} | Val_Acc {:.4f} | Test_Acc {:.4f}"
+        #       .format(epoch, total_loss / (it+1), val_acc, test_acc))
+    #     if PROFILING:
+    #         prof.step()
+    # print("Best Val Acc {:.4f} | Cor Test Acc {:.4f}".format(best_val_acc, cor_test_acc))
+    # if PROFILING:
+    #     prof.stop()
+    #     print(prof.key_averages().table(sort_by="cpu_time_total"))
+        metric.print_metrics()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -168,7 +182,8 @@ if __name__ == "__main__":
         data = RedditDataset(transform=transform)
     g = data[0]
     print(type(g))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     torch.cuda.set_device(1)
     g = g.to(device)
     # g = g.int().to(device)

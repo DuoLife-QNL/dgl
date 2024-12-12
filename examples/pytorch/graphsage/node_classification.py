@@ -10,6 +10,7 @@ from ogb.nodeproppred import DglNodePropPredDataset
 import tqdm
 import argparse
 
+
 class SAGE(nn.Module):
     def __init__(self, in_size, hid_size, out_size):
         super().__init__()

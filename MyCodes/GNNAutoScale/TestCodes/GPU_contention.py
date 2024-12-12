@@ -27,7 +27,7 @@ def run(metric_name: str, dev_id: int, data_push: Tensor, data_pull: Tensor):
     # from CPU to GPU
     data_pull = data_pull.to(device)
     data_pull += 1
-    metric.stop("pull")
+    metric.stop("pull") 
 
     metric.print_metrics()
     return data_pull

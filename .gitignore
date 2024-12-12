@@ -176,6 +176,7 @@ MyCodes/Profiling/
 # running logs
 MyCodes/multirun
 MyCodes/outputs
+MyCodes/Toys/learn_hydra/outputs
 
 # Obj temp storage
 *.pickle

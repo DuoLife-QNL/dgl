@@ -9,14 +9,14 @@ self_loop: true
 num_layers: 2
 hidden_channels: 256
 dropout: 0.5
-num_parts: 200
-batch_size: 50
+num_parts: 900
+batch_size: 6
 inference_batch_size: null
 lr: 0.01
 reg_weight_decay: 0.0
 nonreg_weight_decay: 0.0
 grad_norm: null
-epochs: 200
+epochs: 10
 test_every: 1
 
 drop_input: false

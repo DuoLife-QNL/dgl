@@ -46,8 +46,8 @@ class GCN(GASGNN):
                 in_dim = in_channels
             if i == num_layers - 1 and not linear:
                 out_dim = out_channels
-            conv = dglnn.GraphConv(in_dim, out_dim)
-            # conv = dglnn.SAGEConv(in_dim, out_dim, aggregator_type='gcn')
+            # conv = dglnn.GraphConv(in_dim, out_dim)
+            conv = dglnn.SAGEConv(in_dim, out_dim, aggregator_type='mean')
             self.convs.append(conv)
 
         self.bns = ModuleList()

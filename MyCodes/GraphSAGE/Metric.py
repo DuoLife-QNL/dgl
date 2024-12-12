@@ -160,8 +160,7 @@ class Metric(ContextDecorator):
             print(transposed_table)
 
     def _log_metrics(self, log: Optional[Logger] = None, output_csv: Optional[str] = None):
-        if log is None:
-            log = self._logger
+        log = self._logger
         header = ["Name", "Count", "Average", "Max", "Min", "Category"]
         table = PrettyTable(header)
         transposed_table = PrettyTable()

@@ -5,7 +5,9 @@ import sys
 import os
 import pickle
 import logging
+from logging import Logger
 from torch_autoscale.Metric import Metric
+from tqdm import tqdm
 
 from load_reddit_dataset import load_reddit
 from torch_autoscale.models import GCN, FMGCN
@@ -45,7 +47,7 @@ from torch.profiler import record_function
 
 from torch.utils.tensorboard import SummaryWriter
 
-import GPUtil
+import GPUtil 
 
 
 torch.manual_seed(12345)
@@ -162,7 +164,7 @@ def graph_partition(g, num_parts, partition_method = 'metis', part_path: Optiona
     elif partition_method == 'sequential':
         # Sequantial Partition
         num_nodes = g.num_nodes()
-        num_nodes_per_part = 68
+        num_nodes_per_part = num_nodes // num_parts
         id_seq = torch.arange(num_nodes)
         batches = torch.split(id_seq, num_nodes_per_part)
     else:
@@ -273,14 +275,18 @@ class SubgraphConstructor(object):
 
     #     return block_all2IB, block_IB2OB
         
-def parse_args_from_block(block, training=True):
+def parse_args_from_block(block, training=True, metric: Metric=None):
     if training is False:
         return (None, None, None, None, None)
 
     else:
         feat = block.srcdata['feat']
         # the number of IB-nodes is the number of output nodes
-        num_output_nodes = block.num_dst_nodes()
+        num_IB_nodes = num_output_nodes = block.num_dst_nodes()
+        # the number of OB-nodes
+        num_OB_nodes = block.num_src_nodes() - num_output_nodes
+        metric.set('num_IB_nodes', num_IB_nodes)
+        metric.set('num_OB_nodes', num_OB_nodes)
         # output_nodes are in-batch-nodes
         output_nodes = block.dstdata[dgl.NID].to('cpu')
         IB_nodes = output_nodes
@@ -293,26 +299,26 @@ def parse_args_from_block(block, training=True):
         lead_node_id = torch.tensor([0])
         for i in count[:-1]:
             index += i
-            lead_node_id =  torch.cat((lead_node_id, torch.flatten(n_ids[index]).to('cpu')), dim=0)
+            lead_node_id = torch.cat((lead_node_id, torch.flatten(n_ids[index]).to('cpu')), dim=0)
         offset = lead_node_id
 
         return feat, num_output_nodes, n_ids, offset, count
 
-def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None):
+def gas_train(model: GCN, loader: TorchDataLoader, optimizer, device, acc_log: bool = False, writer: Optional[SummaryWriter] = None, global_iter: Optional[GlobalIterater] = None, grad_norm: Optional[float] = None, metric: Optional[Metric] = None, log: Optional[Logger] = None):
     if metric is None:
         metric = Metric()
     model.train()
 
     criterion = torch.nn.CrossEntropyLoss()
     
-    for it, blocks in enumerate(loader):
+    for it, blocks in enumerate(tqdm(loader)):
         block = blocks[0]
         optimizer.zero_grad()
         # metric.start('H2D: block_all2IB')
         block = block.to(device)
         # metric.stop('H2D: block_all2IB')
         metric.start('parse_arg')
-        args = parse_args_from_block(block, training=True)
+        args = parse_args_from_block(block, training=True, metric=metric)
         metric.stop('parse_arg')
         metric.start('forward')
         out = model(block, *args)
@@ -417,7 +423,7 @@ def layerwise_minibatch_test(model: GCN, g: dgl.DGLGraph, out_size: int, device,
     return train_acc, val_acc, test_acc
 
 
-def run(rank, world_size, devices: List[int], histories, dataset_info, conf: DictConfig, prof_utils: Tuple, q: Queue):
+def run(rank, world_size, devices: List[int], histories, dataset_info, conf: DictConfig, prof_utils: Tuple, q: Queue, hydra_output_dir: str):
     if world_size > 1:
         qh = logging.handlers.QueueHandler(q)
         root = logging.getLogger()
@@ -572,18 +578,23 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
     for epoch in range(0, EPOCHS):
         metric.start('epoch (train)')
         if TRAINING_METHOD == 'gas':
-            gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+            gas_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric, log=log)
         elif TRAINING_METHOD == 'graphfm':
             fm_train(model, subgraph_loader, optimizer, device, acc_log=ACCLOG, writer=writer, global_iter=global_iter, grad_norm=GRAD_NORM, metric=metric)
+        if world_size > 1:
+            for history in histories:
+                if history.set_gpu_cache:
+                    metric.start("sync-cache")
+                    history.sync_cache()
+                    metric.stop("sync-cache")
         metric.stop('epoch (train)')
-        if epoch % TEST_EVERY == 0 and rank == 2:
+        if epoch % TEST_EVERY == 0 and rank == 0:
             metric.start('test')
             train_acc, val_acc, tmp_test_acc = layerwise_minibatch_test(
                 model if world_size == 1 else model.module,
                 g, out_size, device, INFERENCE_BATCH_SIZE, history_refresh=HISTORY_REFRESH
                 )
             metric.stop('test')
-            # train_acc, val_acc, tmp_test_acc = test(model, g, device)
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 test_acc = tmp_test_acc
@@ -594,17 +605,8 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
             
             log.info(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
                 f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
-            # print("Test time (s): {:4f}".format(test_timer.duration()))
-            print(f'Epoch: {epoch:03d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
-                f'Test: {tmp_test_acc:.4f}, Final: {test_acc:.4f}')
-        if world_size > 1:
-            for history in histories:
-                if history.set_gpu_cache:
-                    metric.start("sync-cache")
-                    history.sync_cache()
-                    metric.stop("sync-cache")
-        # prevent from dgl cuda OOM
-        torch.cuda.empty_cache()
+        # # prevent from dgl cuda OOM
+        # torch.cuda.empty_cache()
         GPUs = GPUtil.getGPUs()
         metric.set("GPU Memory Usage", GPUs[0].memoryUsed)
         if PROFILING:
@@ -612,8 +614,7 @@ def run(rank, world_size, devices: List[int], histories, dataset_info, conf: Dic
         if world_size > 1:
             dist.barrier()
 
-    # metric.logger_print_metrics()
-    metric.print_metrics()
+    metric.print_metrics(output_csv=os.path.join(hydra_output_dir, 'metrics-rank{}.csv'.format(rank)))
     if PROFILING:
         prof.stop()
         print(prof.key_averages().table(sort_by="cpu_time_total"))
@@ -629,6 +630,7 @@ def test(rank, world_size, q):
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(conf: DictConfig):
+    HYDRA_OUTPUT_DIR = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     dataset_settings = conf._dataset
     run_env = conf.run_env
     profiling_settings = run_env.prof
@@ -652,7 +654,6 @@ def main(conf: DictConfig):
     SET_GPU_CACHE = opt_settings.gpu_cache
 
     # check if GPU is type int 
-
 
     if isinstance(GPU, int):
         devices = [GPU]
@@ -698,9 +699,9 @@ def main(conf: DictConfig):
     lp.start()
 
     if n_gpus == 1:
-        run(0, n_gpus, devices, histories, dataset_info, conf, profiling_utils, q)
+        run(0, n_gpus, devices, histories, dataset_info, conf, profiling_utils, q, HYDRA_OUTPUT_DIR)
     else:
-        mp.spawn(run, args=(n_gpus, devices, histories, dataset_info, conf, profiling_utils, q), nprocs=n_gpus)
+        mp.spawn(run, args=(n_gpus, devices, histories, dataset_info, conf, profiling_utils, q, HYDRA_OUTPUT_DIR), nprocs=n_gpus)
 
     q.put(None)
     lp.join()

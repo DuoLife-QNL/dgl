@@ -5,30 +5,6 @@ from logging import Logger
 from typing import Optional
 from prettytable import PrettyTable
 
-display_fields = [
-    "construct subgraph: all2IB",
-    "H2D: subgraph all2IB",
-    "parse_arg",
-    # "Forward_1: conv_all2IB",
-    # "Push_1: transfer to CPU",
-    # "Push_2: insert to history",
-    "Push",
-    # "Pull_2.1: index_select",
-    # "Pull_2.2: transfer to GPU",
-    "Pull",
-    # "Forward_2: push_and_pull",
-    # "Forward_3: conv_final_layer",
-    "forward",
-    "backward",
-    "epoch (train)",
-    "test",
-    # "push_num_nodes",
-    # "push_num_dim",
-    # "pull_num_nodes",
-    # "pull_num_dim",
-    # "GPU Memory Usage",
-]
-
 try:
     # Available in Python >= 3.2
     from contextlib import ContextDecorator
@@ -111,29 +87,22 @@ class Metric(ContextDecorator):
         else:
             return 0
 
-    def print_metrics(self, output_file=None, output_csv: Optional[str] = None):
-        assert(self._logger)
-        self._log_metrics(output_csv=output_csv)
-        
-        # if output_file:
-        #     with open(output_file, 'w') as f:
-        #         self._print_metrics(f)
-        
-        # if self._logger:
-        #     self._log_metrics()
-        # else:
-        #     self._print_metrics()
+    def print_metrics(self, output_file=None):
+        if output_file:
+            with open(output_file, 'w') as f:
+                self._print_metrics(f)
+        else:
+            self._print_metrics()
+        if self._logger:
+            self._log_metrics()
     
     def logger_print_metrics(self):
         self._log_metrics()
         
     def _print_metrics(self, output_file=None):
         table = PrettyTable()
-        transposed_table = PrettyTable()
         table.field_names = ["Name", "Count", "Average", "Max", "Min", "Category"]
-        transposed_table.add_column("Metric", ["Count", "Average", "Max", "Min", "Category"])
         table.float_format = ".4"
-        transposed_table.float_format = ".4"
         table.align["Name"] = "l"
         for name in self.times.keys():
             count = self._get_count(name)
@@ -141,55 +110,37 @@ class Metric(ContextDecorator):
             max_time = self._max_time(name)
             min_time = self._min_time(name)
             table.add_row([name, count, avg, max_time, min_time, "Time"])
-            transposed_table.add_column(name, [count, avg, max_time, min_time, "Time"])
         for name in self.sets.keys():
             count = self._get_count(name)
             avg = sum(self.sets[name]) / count
             max_value = max(self.sets[name])
             min_value = min(self.sets[name])
             table.add_row([name, count, avg, max_value, min_value, "Value"])
-            transposed_table.add_column(name, [count, avg, max_value, min_value, "Value"])
         table.title = "Metrics for {}".format(self._name)
-        transposed_table.title = "Metrics for {}".format(self._name)
-
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(str(table))
         else:
             print(table)
-            print(transposed_table)
 
-    def _log_metrics(self, log: Optional[Logger] = None, output_csv: Optional[str] = None):
+    def _log_metrics(self, log: Optional[Logger] = None):
         if log is None:
             log = self._logger
         header = ["Name", "Count", "Average", "Max", "Min", "Category"]
         table = PrettyTable(header)
-        transposed_table = PrettyTable()
-        transposed_table.add_column("Metric", ["Count", "Average", "Max", "Min", "Category"])
+        table.float_format = ".4"
         table.align["Name"] = "l"
         for name in self.times.keys():
             count = self._get_count(name)
             avg = self._average(name)
             max_time = self._max_time(name)
             min_time = self._min_time(name)
-            table.add_row([name, count, f"{avg:.4f}", f"{max_time:.4f}", f"{min_time:.4f}", "Time"])
-            transposed_table.add_column(name, [count, f"{avg:.4f}", f"{max_time:.4f}", f"{min_time:.4f}", "Time"])
+            table.add_row([name, count, avg, max_time, min_time, "Time"])
         for name in self.sets.keys():
             count = self._get_count(name)
             avg = sum(self.sets[name]) / count
             max_value = max(self.sets[name])
             min_value = min(self.sets[name])
             table.add_row([name, count, avg, max_value, min_value, "Value"])
-            transposed_table.add_column(name, [count, avg, max_value, min_value, "Value"])
-        
         table.title = "Metrics for {}".format(self._name)
-        transposed_table.title = "Metrics for {}".format(self._name)
-
-        log.info("\n" + table.get_formatted_string('text'))
-        
-
-        # print(transposed_table.get_formatted_string('json', fields=display_fields))
-
-        if output_csv:
-            with open(output_csv, 'w') as f:
-                f.write(transposed_table.get_formatted_string('csv'))
+        log.info("\n" + str(table))

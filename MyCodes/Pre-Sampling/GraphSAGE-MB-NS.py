@@ -20,13 +20,6 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 from math import ceil
 
-from Metric import Metric
-import logging
-
-logger = logging.getLogger(__name__)
-metric = Metric(logger=logger)
-
-
 PROFILING = False
 
 PROF_PATH = '/home/lihz/Codes/dgl/MyCodes/Profiling/GraphSAGE-MB-NS/SAGEConv/Default'
@@ -57,9 +50,8 @@ class SAGE(nn.Module):
     def __init__(self, in_size, hid_size, out_size):
         super().__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'mean'))  # type: ignore
-        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, 'mean'))  # type: ignore
-        self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'mean'))  # type: ignore
+        self.layers.append(dglnn.SAGEConv(in_size, hid_size, 'gcn'))  # type: ignore
+        self.layers.append(dglnn.SAGEConv(hid_size, out_size, 'gcn'))  # type: ignore
         self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
@@ -71,7 +63,7 @@ class SAGE(nn.Module):
             h = layer(block, h)
             if l != len(self.layers) - 1:
                 h = F.relu(h)
-                # h = self.dropout(h)
+                h = self.dropout(h)
         return h
 
     def inference(self, g, device, batch_size):
@@ -146,10 +138,7 @@ def train(args, device, g, dataset, model):
     #                           prefetch_labels=['label'])
     batch_size = args.batch_size
     steps_per_epoch = ceil(n_train_nodes / batch_size)
-    # sampler = NeighborSampler([25, 10],  # fanout for [layer-0, layer-1]
-    #                           prefetch_node_feats=['feat'],
-    #                           prefetch_labels=['label'])
-    sampler = NeighborSampler([10, 10, 10],  # fanout for [layer-0, layer-1, layer-2]
+    sampler = NeighborSampler([25, 10],  # fanout for [layer-0, layer-1]
                               prefetch_node_feats=['feat'],
                               prefetch_labels=['label'])
     # use_uva = (args.mode == 'mixed')
@@ -174,19 +163,16 @@ def train(args, device, g, dataset, model):
         prof.start()
     max_mem = 0
     for epoch in range(args.num_epochs):
-        metric.start("Epoch")
         model.train()
         total_loss = 0
         for it, (input_nodes, output_nodes, blocks) in enumerate(train_dataloader):
             x = blocks[0].srcdata['feat']
             y = blocks[-1].dstdata['label']
             # get the input size and output size of each block
-            for i, block in enumerate(blocks):
+            for block in blocks:
                 block_input_node_number = block.number_of_src_nodes()
                 block_output_node_number = block.number_of_dst_nodes()
-                metric.set("Block {} Input Node".format(i), block_input_node_number)
-                metric.set("Block {} Output Node".format(i), block_output_node_number)
-                # block_nedges = block.number_of_edges()
+                block_nedges = block.number_of_edges()
                 # print("number of epoch: {}, number of iteration: {}, block_input_node_number: {}, block_output_node_number: {}, block_nedges: {}".format(epoch, it, block_input_node_number, block_output_node_number, block_nedges))
             with record_function("Forward Computation"):
                 y_hat = model(blocks, x)
@@ -197,12 +183,10 @@ def train(args, device, g, dataset, model):
             total_loss += loss.item()
             if PROFILING:
                 prof.step()
-        metric.stop("Epoch")
         torch.cuda.empty_cache()
         GPUs = GPUtil.getGPUs()
         if GPUs[0].memoryUsed > max_mem:
             max_mem = GPUs[0].memoryUsed
-            
         micro_f1 = evaluate(model, g, val_dataloader)
         test_micro_f1 = evaluate(model, g, test_dataloader)
         print("Epoch {:05d} | Loss {:.4f} | Val_Micro_F1 {:.4f} | Test_Micro_F1 {:.4f} "
@@ -212,37 +196,30 @@ def train(args, device, g, dataset, model):
     print("Max memory used: {}".format(max_mem))
     # print(prof.key_averages(group_by_input_shape=True).table(sort_by="cpu_time"))
 
+def pre_sampling_train():
+    pass
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # Force executing NN Computation on GPU
-    # parser.add_argument("--mode", default='mixed', choices=['cpu', 'mixed', 'puregpu'],
-    #                     help="Training mode. 'cpu' for CPU training, 'mixed' for CPU-GPU mixed training, "
-    #                          "'puregpu' for pure-GPU training."
-    # )
-    parser.add_argument("--num-hidden", type=int, default=256, help="Size of hidden layer.")
+    parser.add_argument("--num-hidden", type=int, default=16, help="Size of hidden layer.")
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--batch-size", type=int, default=5000)
-    parser.add_argument("--num-epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=35)
+    parser.add_argument("--num-epochs", type=int, default=200)
     args = parser.parse_args()
-    # if not torch.cuda.is_available():
-    #     args.mode = 'cpu'
-    # print(f'Training in {args.mode} mode.')
-
-    # device = torch.device("cuda")
-    # dev_id = int(args.gpu)
-    device = 'cuda:0'
+    device = f'cuda:{args.gpu}'
     # torch.cuda.set_device(dev_id)
     # load and preprocess dataset
     print('Loading data')
     # dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-products'))
     # dataset = CiteseerGraphDataset()
-    # dataset = CoraGraphDataset()
+    dataset = CoraGraphDataset()
     # dataset  = PubmedGraphDataset()
-    dataset = RedditDataset(transform=AddSelfLoop())
+    # dataset = RedditDataset(transform=AddSelfLoop())
     g = dataset[0]
     # g = g.to('cuda' if args.mode == 'puregpu' else 'cpu')
     g = g.to('cpu')
     # device = torch.device('cpu' if args.mode == 'cpu' else 'cuda')
+
 
     # create GraphSAGE model
     in_size = g.ndata['feat'].shape[1]
@@ -252,4 +229,3 @@ if __name__ == '__main__':
     # model training
     print('Training...')
     train(args, device, g, dataset, model)
-    metric._print_metrics()
